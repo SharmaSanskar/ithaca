@@ -1,0 +1,197 @@
+# The innermost development loop: every backing service Ithaca talks to, and
+# nothing else. The application itself runs on the host via `make dev` so a Go
+# rebuild is two seconds rather than a container rebuild.
+#
+#   make up      start
+#   make down    stop, keep data
+#   make nuke    stop, delete volumes
+#
+# Everything binds to 127.0.0.1 explicitly. Docker Desktop's default of 0.0.0.0
+# puts an unauthenticated Postgres on your coffee-shop wifi.
+
+name: ithaca
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5432:5432"
+    environment:
+      POSTGRES_USER: ithaca
+      POSTGRES_PASSWORD: ithaca
+      POSTGRES_DB: ithaca
+      # Faster initdb; safe because this database is disposable.
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    command:
+      - postgres
+      # The delivery engine leans hard on SKIP LOCKED, partial indexes and
+      # aggressive autovacuum. These settings make local behaviour resemble the
+      # tuned production instance instead of the 128MB default.
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - work_mem=16MB
+      - -c
+      - maintenance_work_mem=128MB
+      - -c
+      - max_connections=200
+      # Log anything slower than 200ms. The queue's hot path is measured in
+      # microseconds, so a 200ms query is always worth looking at.
+      - -c
+      - log_min_duration_statement=200
+      - -c
+      - log_lock_waits=on
+      # pg_stat_statements is how you answer "which query got slower" without
+      # guessing. Installed by migration in Phase 1.
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.track=all
+      # Dev only: skip the fsync on every commit. Makes the test suite roughly
+      # 5x faster. NEVER set this on anything you care about.
+      - -c
+      - fsync=off
+      - -c
+      - synchronous_commit=off
+      - -c
+      - full_page_writes=off
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ithaca -d ithaca"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  redis:
+    image: redis:8-alpine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
+    command:
+      - redis-server
+      - --appendonly
+      - "no"
+      # Redis is never the source of truth here: it carries wakeup pub/sub,
+      # rate-limit buckets, breaker state and sessions. Losing it must cost
+      # latency, never correctness — so an eviction policy is the honest
+      # configuration rather than unbounded growth.
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - allkeys-lru
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  # LocalStack backs the SQS FIFO driver, so the second queue driver is
+  # developed and tested for free rather than only during the paid AWS week.
+  #
+  # Behind a profile because nothing needs it until Phase 9, and it is a ~1GB
+  # image that would otherwise be pulled and kept resident for eight phases:
+  #
+  #     make up-aws        start it alongside everything else
+  #
+  # Pin note: the semver-major tags (3, 4) are the free community image. The
+  # calver tags that now carry `latest` and `stable` (2026.07, ...) are the Pro
+  # image and refuse to start without LOCALSTACK_AUTH_TOKEN.
+  localstack:
+    image: localstack/localstack:4.9.2
+    profiles: ["aws"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:4566:4566"
+    environment:
+      SERVICES: sqs,sns,s3,kms
+      DEBUG: "0"
+      AWS_DEFAULT_REGION: us-east-1
+      EAGER_SERVICE_LOADING: "1"
+    volumes:
+      - localstackdata:/var/lib/localstack
+    healthcheck:
+      # The health endpoint is the documented probe; `awslocal` is a CLI
+      # convenience that is not guaranteed to be on PATH inside the image.
+      test: ["CMD-SHELL", "curl -sf http://localhost:4566/_localstack/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  # ── observability ──────────────────────────────────────────────────────────
+
+  # The collector sits between the app and every backend so switching from
+  # Jaeger to X-Ray during the AWS week is a config change, not a code change.
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.157.0
+    restart: unless-stopped
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./otel/collector.yaml:/etc/otel/config.yaml:ro
+    ports:
+      - "127.0.0.1:4317:4317"   # OTLP gRPC
+      - "127.0.0.1:4318:4318"   # OTLP HTTP
+      - "127.0.0.1:8889:8889"   # Prometheus exporter (collector's own metrics)
+    depends_on:
+      jaeger:
+        condition: service_started
+
+  # Jaeger v2 is an OpenTelemetry Collector distribution, so OTLP on 4317/4318
+  # is native and needs no opt-in. Only the UI is published to the host; the
+  # collector reaches it over the compose network.
+  jaeger:
+    image: jaegertracing/jaeger:2.20.0
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:16686:16686"  # UI
+
+  prometheus:
+    image: prom/prometheus:v3.13.2
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      - --web.enable-lifecycle
+      # Native histograms give exact quantiles without pre-picking buckets.
+      - --enable-feature=native-histograms
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - promdata:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    extra_hosts:
+      # Ithaca runs on the host during development; this is how the scraper
+      # reaches it from inside the container on both macOS and Linux.
+      - "host.docker.internal:host-gateway"
+
+  grafana:
+    image: grafana/grafana:13.1.0
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_USERS_DEFAULT_THEME: dark
+      GF_FEATURE_TOGGLES_ENABLE: traceToMetrics
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafanadata:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      prometheus:
+        condition: service_started
+
+volumes:
+  pgdata:
+  redisdata:
+  localstackdata:
+  promdata:
+  grafanadata:

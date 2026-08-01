@@ -1,0 +1,57 @@
+name: ci-web
+
+on:
+  push:
+    branches: [main]
+    paths: ["web/**", ".github/workflows/ci-web.yml"]
+  pull_request:
+    paths: ["web/**", ".github/workflows/ci-web.yml"]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-web-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: typecheck, lint, build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # `npm ci` rather than `npm install`: it installs exactly the lockfile
+      # and fails if package.json and the lock have drifted, which is the whole
+      # point of committing a lockfile.
+      - name: install
+        run: npm ci --no-audit --no-fund
+
+      - name: typecheck
+        run: npm run typecheck
+
+      - name: lint
+        run: npm run lint
+
+      - name: format check
+        run: npm run format:check
+
+      - name: build
+        run: npm run build
+
+      # The Go binary embeds this directory. If the build silently produced
+      # nothing, the container would ship a dashboard-less image and only fail
+      # at runtime.
+      - name: verify build output
+        run: test -f ../internal/web/dist/index.html

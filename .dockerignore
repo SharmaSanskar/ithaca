@@ -1,0 +1,39 @@
+# Keep the build context small: every byte here is uploaded to the daemon on
+# every build, and anything that changes often invalidates layer caches.
+
+.git
+.github
+.vscode
+.idea
+.DS_Store
+
+# Build outputs
+bin/
+dist/
+internal/web/dist/
+!internal/web/dist/.gitkeep
+
+# Node
+web/node_modules/
+web/.vite/
+npm-debug.log*
+
+# Go
+*.test
+*.out
+coverage.*
+
+# Infra and docs are not needed to compile the binary
+infra/
+deploy/k8s/
+docs/
+bench/
+*.md
+!README.md
+
+# Secrets must never reach a layer
+.env
+.env.*
+!.env.example
+*.pem
+*.key

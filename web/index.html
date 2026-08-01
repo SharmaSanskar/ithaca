@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <title>Ithaca</title>
+    <meta
+      name="description"
+      content="Webhook and event delivery platform: retries, ordering, idempotency, dead letters."
+    />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+
+    <!--
+      Theme is applied before first paint, synchronously, in the document head.
+
+      Any theme system that waits for React to mount produces a white flash on
+      every load for dark-mode users. On a dark-first console that flash is the
+      most noticeable thing about the whole product, so this ~15 lines of
+      blocking script buys more perceived quality than anything else here.
+    -->
+    <script>
+      ;(function () {
+        try {
+          var stored = localStorage.getItem('ithaca.theme')
+          var dark =
+            stored === 'dark' ||
+            (stored !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches)
+          document.documentElement.classList.toggle('dark', dark)
+          document.documentElement.style.colorScheme = dark ? 'dark' : 'light'
+
+          var density = localStorage.getItem('ithaca.density') || 'compact'
+          document.documentElement.dataset.density = density
+        } catch (e) {
+          /* private browsing with storage disabled: dark default is fine */
+        }
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

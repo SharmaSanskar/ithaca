@@ -1,0 +1,133 @@
+name: ci-go
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A new push to the same branch cancels the previous run. Without this, a
+# rapid-fire branch queues five redundant runs and the useful one waits.
+concurrency:
+  group: ci-go-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.25"
+
+jobs:
+  # Split from `test` on purpose: lint gives feedback in ~40s while the test
+  # job is still pulling a Postgres image, and a lint failure should not hide
+  # a test failure (or vice versa).
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l -s .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::these files are not gofmt'd:"
+            echo "$unformatted"
+            gofmt -d -s $unformatted
+            exit 1
+          fi
+
+      - name: go mod tidy is clean
+        run: |
+          go mod tidy
+          if ! git diff --quiet go.mod go.sum; then
+            echo "::error::go.mod/go.sum are out of date; run 'go mod tidy'"
+            git diff go.mod go.sum
+            exit 1
+          fi
+
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout=5m
+
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # Both build tags must compile. Without the second one, a broken embed
+      # directive only surfaces when the container build runs — much later,
+      # and much more annoying to diagnose.
+      - name: build (no dashboard)
+        run: go build ./...
+
+      - name: build (dashboard embedded)
+        run: go build -tags embedweb ./...
+
+      - name: vet
+        run: go vet ./...
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: ithaca
+          POSTGRES_PASSWORD: ithaca
+          POSTGRES_DB: ithaca
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ithaca"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # -shuffle=on catches tests that only pass because an earlier test left
+      # state behind. -count=1 defeats the test result cache, which otherwise
+      # makes a green run meaningless when only non-Go files changed.
+      - name: unit tests
+        run: go test -race -shuffle=on -count=1 -covermode=atomic -coverprofile=coverage.out ./...
+        env:
+          ITHACA_DATABASE_URL: postgres://ithaca:ithaca@localhost:5432/ithaca?sslmode=disable
+          ITHACA_REDIS_URL: redis://localhost:6379/0
+
+      - name: coverage summary
+        run: go tool cover -func=coverage.out | tail -1
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage
+          path: coverage.out
+          retention-days: 7

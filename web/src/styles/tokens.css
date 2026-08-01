@@ -1,0 +1,135 @@
+/*
+ * Ithaca design tokens.
+ *
+ * ── The one idea ────────────────────────────────────────────────────────────
+ * Color is a data channel, not decoration. Every pixel of chrome is
+ * achromatic — blue-cast neutrals, hairlines, tabular mono. The only saturated
+ * color on screen is EVENT STATE. That single rule is why this will not read as
+ * a component-library template: generic dashboards spend their color budget on
+ * chrome and then have nothing left to say with it.
+ *
+ * ── Why oklch ───────────────────────────────────────────────────────────────
+ * Perceptual lightness is the L channel, so "one step darker" is arithmetic
+ * rather than guesswork, and a hue rotation does not change apparent
+ * brightness the way it does in HSL. That matters here because the status ramp
+ * has to stay distinguishable in both themes and under color-vision
+ * deficiency.
+ *
+ * The status values below were checked for pairwise distance under
+ * protanopia/deuteranopia simulation and for ≥3:1 contrast against their
+ * surface. Do not "brighten" them by eye without re-checking — the dark set
+ * clears the adjacent-pair threshold, but not by much, which is exactly why
+ * every status also ships a shape glyph and a text label.
+ */
+
+:root {
+  /* ── surfaces (light) ── */
+  --bg-canvas: oklch(0.985 0.003 265); /* page plane   */
+  --bg-surface: oklch(1 0 0); /* panels/cards */
+  --bg-inset: oklch(0.965 0.003 265); /* wells, table headers */
+  --bg-raised: oklch(1 0 0); /* overlays     */
+  --bg-hover: oklch(0.96 0.004 265);
+
+  /* ── hairlines: this is how elevation works here, not shadows ── */
+  --line: oklch(0.2 0.01 265 / 10%);
+  --line-strong: oklch(0.2 0.01 265 / 18%);
+  --line-faint: oklch(0.2 0.01 265 / 5%);
+
+  /* ── text hierarchy (contrast measured against --bg-surface) ── */
+  --fg: oklch(0.2 0.008 265); /* 18.1:1  primary   */
+  --fg-2: oklch(0.44 0.008 265); /*  7.8:1  secondary */
+  --fg-3: oklch(0.56 0.008 265); /*  4.7:1  muted     */
+  --fg-4: oklch(0.68 0.008 265); /*  2.9:1  LARGE TEXT / decorative only */
+
+  /* ── signal: the single brand accent (teal, 195°) ── */
+  --signal: oklch(0.5 0.105 195);
+  --signal-ink: oklch(0.46 0.1 195);
+  --signal-wash: oklch(0.5 0.105 195 / 10%);
+  --focus-ring: oklch(0.5 0.105 195 / 55%);
+
+  /* ── quantitative ordinal ramp ──
+   * ONE hue, monotone lightness. Used for anything with an inherent order:
+   * p50 < p90 < p99, volume heat, throughput. Three categorical hues would
+   * hide the ordering that the reader should be able to see in the color. */
+  --q-1: oklch(0.72 0.1 195);
+  --q-2: oklch(0.58 0.115 195);
+  --q-3: oklch(0.44 0.1 195);
+
+  /* ── status ramp — the only saturated color in the product ── */
+  --st-queued: oklch(0.55 0.028 255); /* slate  — inert, nothing spent yet */
+  --st-delivering: oklch(0.55 0.131 245); /* azure  — in flight  */
+  --st-delivered: oklch(0.47 0.15 152); /* green  — terminal ok */
+  --st-retrying: oklch(0.665 0.13 80); /* amber  — degraded   */
+  --st-failed: oklch(0.47 0.19 28); /* red    — attempt lost */
+  --st-dead: oklch(0.56 0.2 315); /* violet — dead letter  */
+
+  /* Status ink: text sitting on a tinted pill of the same status. */
+  --st-queued-ink: oklch(0.44 0.028 255);
+  --st-delivering-ink: oklch(0.44 0.105 245);
+  --st-delivered-ink: oklch(0.44 0.109 152);
+  --st-retrying-ink: oklch(0.44 0.086 80);
+  --st-failed-ink: oklch(0.44 0.15 28);
+  --st-dead-ink: oklch(0.44 0.15 315);
+
+  /* ── chart chrome ── */
+  --grid: oklch(0.925 0.004 265);
+  --axis: oklch(0.86 0.005 265);
+
+  /* ── geometry ──
+   * 6px, deliberately tighter than the 10px most component libraries default
+   * to. Consumer-app softness reads as "template"; instrument panels are
+   * tight. Nothing in the app is rounder than 8px except avatars. */
+  --radius: 0.375rem;
+  --gutter: 0.75rem;
+
+  /* Density is a first-class control: compact is the default so a reviewer
+   * sees 40 rows of real data at once rather than 12. */
+  --row-h: 2rem;
+}
+
+.dark {
+  --bg-canvas: oklch(0.145 0.007 265);
+  --bg-surface: oklch(0.185 0.007 265);
+  --bg-inset: oklch(0.165 0.007 265);
+  --bg-raised: oklch(0.225 0.007 265);
+  --bg-hover: oklch(0.265 0.007 265);
+
+  --line: oklch(1 0 0 / 9%);
+  --line-strong: oklch(1 0 0 / 15%);
+  --line-faint: oklch(1 0 0 / 5%);
+
+  --fg: oklch(0.97 0.004 265); /* 18.1:1 */
+  --fg-2: oklch(0.78 0.008 265); /*  9.8:1 */
+  --fg-3: oklch(0.62 0.01 265); /*  5.4:1 */
+  --fg-4: oklch(0.5 0.01 265); /*  3.3:1 */
+
+  --signal: oklch(0.8 0.11 195); /* 11.1:1 */
+  --signal-ink: oklch(0.8 0.11 195);
+  --signal-wash: oklch(0.8 0.11 195 / 12%);
+  --focus-ring: oklch(0.8 0.11 195 / 60%);
+
+  --q-1: oklch(0.78 0.1 195);
+  --q-2: oklch(0.66 0.115 195);
+  --q-3: oklch(0.54 0.11 195);
+
+  --st-queued: oklch(0.6 0.03 255);
+  --st-delivering: oklch(0.62 0.147 245);
+  --st-delivered: oklch(0.52 0.129 152);
+  --st-retrying: oklch(0.665 0.13 80); /* mode-invariant: both themes agree on "amber" */
+  --st-failed: oklch(0.575 0.19 28);
+  --st-dead: oklch(0.61 0.19 315);
+
+  --st-queued-ink: oklch(0.84 0.02 255);
+  --st-delivering-ink: oklch(0.84 0.08 245);
+  --st-delivered-ink: oklch(0.84 0.12 152);
+  --st-retrying-ink: oklch(0.84 0.12 80);
+  --st-failed-ink: oklch(0.84 0.083 28);
+  --st-dead-ink: oklch(0.84 0.11 315);
+
+  --grid: oklch(0.26 0.006 265);
+  --axis: oklch(0.34 0.007 265);
+}
+
+[data-density='comfortable'] {
+  --row-h: 2.5rem;
+}

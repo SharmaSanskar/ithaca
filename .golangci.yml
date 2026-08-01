@@ -1,0 +1,145 @@
+# golangci-lint v2 configuration.
+#
+# The selection is deliberately biased toward the failure modes this particular
+# system has: dropped contexts during drain, unchecked errors on the ack path,
+# unclosed response bodies, and SSRF-adjacent mistakes in the delivery client.
+# Style linters that mostly generate noise are off.
+
+version: "2"
+
+run:
+  timeout: 5m
+  build-tags:
+    - integration
+    - embedweb
+
+linters:
+  default: none
+  enable:
+    # ── correctness ──────────────────────────────────────────────────────────
+    - errcheck # an unchecked error on the ack path is a lost delivery
+    - govet
+    - staticcheck
+    - ineffassign
+    - unused
+    - bodyclose # an unclosed body leaks the keep-alive connection, which for
+      # a delivery engine means eventual FD exhaustion
+    - contextcheck # a dropped context breaks cancellation during drain
+    - nilerr
+    - errorlint # errors.Is/As rather than == and bare type assertions
+    - durationcheck
+    - makezero
+    - rowserrcheck
+    - sqlclosecheck
+    - noctx # every outbound call must be cancellable
+
+    # ── security ─────────────────────────────────────────────────────────────
+    - gosec
+
+    # ── resource discipline ──────────────────────────────────────────────────
+    - copyloopvar
+    - prealloc
+    - wastedassign
+
+    # ── readability ──────────────────────────────────────────────────────────
+    - misspell
+    - unconvert
+    - unparam
+    - revive
+    - gocritic
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: false
+      exclude-functions:
+        # Once the status line is on the wire there is no recovery path; the
+        # error is logged where it can actually be acted on.
+        - (net/http.ResponseWriter).Write
+        - (*bytes.Buffer).Write
+        - (*strings.Builder).Write
+
+    gosec:
+      excludes:
+        - G104 # duplicated by errcheck
+        - G404 # math/rand is correct for retry jitter; crypto/rand is not needed
+      config:
+        G306: "0644"
+
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment # struct packing is not the bottleneck here
+
+    revive:
+      rules:
+        - name: exported
+          arguments: [checkPrivateReceivers, disableStutteringCheck]
+        - name: package-comments
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: indent-error-flow
+        - name: var-naming
+        - name: range-val-address
+        - name: unreachable-code
+        - name: waitgroup-by-value
+
+    gocritic:
+      enabled-tags: [diagnostic, performance]
+      disabled-checks:
+        - hugeParam # fires on config structs passed once at boot
+        - rangeValCopy
+
+    staticcheck:
+      checks: ["all", "-ST1000", "-ST1003", "-ST1020", "-ST1021", "-ST1022"]
+
+    misspell:
+      locale: US
+
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - std-error-handling
+    rules:
+      # Test code gets a longer leash. Table-driven tests legitimately shadow
+      # variables, allocate in loops, and ignore errors that the following
+      # assertion already covers. httptest.NewRequest without a context is the
+      # documented way to build a test request.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+          - noctx
+          - unparam
+          - prealloc
+          - contextcheck
+          - bodyclose
+
+      # sqlc output is machine-written; linting it produces findings we cannot
+      # act on without editing generated code.
+      - path: internal/store/gen/
+        linters:
+          - revive
+          - staticcheck
+          - unused
+          - gocritic
+          - errcheck
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    gofmt:
+      simplify: true
+    goimports:
+      local-prefixes:
+        - github.com/SharmaSanskar/ithaca
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

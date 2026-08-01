@@ -1,0 +1,2 @@
+# Placeholder so `go build -tags embedweb` compiles on a clean checkout.
+# The real contents are written by `npm run build` (vite outDir).

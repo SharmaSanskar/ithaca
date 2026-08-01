@@ -1,0 +1,65 @@
+# ── build output ─────────────────────────────────────────────────────────────
+bin/
+# Leading slash: root only. A bare `dist/` would match internal/web/dist too,
+# and once git excludes a DIRECTORY it never descends into it — so the
+# `!internal/web/dist/.gitkeep` negation below would silently never apply, the
+# placeholder would not be committed, and `go build -tags embedweb` would fail
+# on a fresh clone with "pattern all:dist: no matching files found".
+/dist/
+*.exe
+*.test
+*.out
+coverage.out
+coverage.html
+
+# The dashboard build is a build artifact, not source. The .gitkeep stays so
+# `go build -tags embedweb` compiles on a clean checkout.
+internal/web/dist/*
+!internal/web/dist/.gitkeep
+
+# ── node ─────────────────────────────────────────────────────────────────────
+node_modules/
+.vite/
+*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+
+# ── secrets ──────────────────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+!**/testdata/**/*.pem
+
+# ── terraform ────────────────────────────────────────────────────────────────
+# State belongs in S3, never in git. It is not encrypted, it contains every
+# output including generated passwords, and two people applying from different
+# checkouts will silently destroy each other's infrastructure.
+**/.terraform/
+**/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# ── kubernetes ───────────────────────────────────────────────────────────────
+kubeconfig
+*.kubeconfig
+
+# ── local tooling ────────────────────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.shared.json
+.air.toml
+
+# scripts/dev.sh writes PID files and per-service logs here.
+tmp/

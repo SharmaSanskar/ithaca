@@ -1,0 +1,38 @@
+# Local scrape config. In Kubernetes this is replaced by ServiceMonitors from
+# kube-prometheus-stack, but the metric names and labels stay identical so the
+# same dashboards work in both places.
+
+global:
+  scrape_interval: 5s      # tight, because local runs are short and bursty
+  evaluation_interval: 15s
+  external_labels:
+    env: dev
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Ithaca services run on the host during development. Each exposes its
+  # metrics on the ADMIN port, never the traffic port.
+  - job_name: ithaca
+    static_configs:
+      - targets: ["host.docker.internal:9080"]
+        labels: { service: api }
+      - targets: ["host.docker.internal:9081"]
+        labels: { service: ingest }
+      - targets: ["host.docker.internal:9082"]
+        labels: { service: ws }
+      - targets: ["host.docker.internal:9083"]
+        labels: { service: dispatcher }
+      - targets: ["host.docker.internal:9084"]
+        labels: { service: worker }
+      - targets: ["host.docker.internal:9085"]
+        labels: { service: receiver-sim }
+    # Not every service runs in every session; a down target is expected and
+    # should not spam the log.
+    honor_labels: true
+
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8889"]

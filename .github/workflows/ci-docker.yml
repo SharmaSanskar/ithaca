@@ -1,0 +1,66 @@
+name: ci-docker
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-docker-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: image builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Build only, never push, on every PR. A Dockerfile that stops building
+      # is otherwise discovered at release time, which is the worst moment.
+      # Single-arch here; the multi-arch release build lives in the deploy
+      # workflow, where the extra ~4 minutes are worth paying.
+      - name: build
+        uses: docker/bake-action@v5
+        with:
+          files: build/docker-bake.hcl
+          targets: ithaca
+          load: true
+          set: |
+            *.cache-from=type=gha
+            *.cache-to=type=gha,mode=max
+        env:
+          VERSION: ci-${{ github.sha }}
+          COMMIT: ${{ github.sha }}
+
+      # A container that cannot print its own version is not a container that
+      # will start in Kubernetes. This catches a broken ENTRYPOINT, a missing
+      # static link, and an architecture mismatch in about two seconds.
+      - name: smoke test
+        run: |
+          docker run --rm ithaca:dev version
+          docker run --rm ithaca:dev help
+
+      - name: verify the image runs as non-root
+        run: |
+          uid="$(docker inspect --format '{{.Config.User}}' ithaca:dev)"
+          echo "image user: $uid"
+          if [ "$uid" = "" ] || [ "$uid" = "0" ] || [ "${uid%%:*}" = "root" ]; then
+            echo "::error::image must not run as root"
+            exit 1
+          fi
+
+      - name: scan for known vulnerabilities
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ithaca:dev
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
