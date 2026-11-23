@@ -82,3 +82,46 @@ func (s *StatsLoop) Run(ctx context.Context) error {
 		}
 	}
 }
+
+// BreakerTicker is implemented by queue drivers that keep breaker state.
+type BreakerTicker interface {
+	BreakerTick(ctx context.Context) (parked, expired, probes int64, err error)
+}
+
+// BreakerLoop parks streams of open endpoints and starts half-open probes.
+// Like the reaper, it runs in every dispatcher; SKIP LOCKED keeps it to one
+// probe per endpoint across all of them.
+type BreakerLoop struct {
+	B     BreakerTicker
+	Every time.Duration
+	Log   *slog.Logger
+	M     *Metrics
+}
+
+// Run ticks until ctx is done.
+func (b *BreakerLoop) Run(ctx context.Context) error {
+	t := time.NewTicker(b.Every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-t.C:
+		}
+		parked, expired, probes, err := b.B.BreakerTick(ctx)
+		if err != nil {
+			if ctx.Err() == nil {
+				b.Log.Warn("breaker tick failed", "error", err)
+			}
+			continue
+		}
+		b.M.BreakerParked.Add(float64(parked))
+		b.M.BreakerProbes.Add(float64(probes))
+		if expired > 0 {
+			b.Log.Warn("half-open probes timed out; endpoints returned to open", "count", expired)
+		}
+		if probes > 0 {
+			b.Log.Info("half-open probes started", "count", probes)
+		}
+	}
+}

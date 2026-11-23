@@ -291,7 +291,7 @@ FROM candidate, endpoints e
 WHERE s.id = candidate.id AND e.id = s.endpoint_id
 RETURNING s.id, s.lock_token, s.tenant_id, s.subscription_id, s.endpoint_id, s.ordered, s.stream_key,
           e.url, e.state AS endpoint_state, e.timeout_ms, e.max_concurrency,
-          e.signing_key_id, e.signing_secret,
+          e.signing_key_id, e.signing_secret, e.circuit_state, e.circuit_probe_stream_id,
           GREATEST($2::bigint, e.timeout_ms * 2 + $3::bigint)::bigint AS lease_ms
 `
 
@@ -303,20 +303,22 @@ type LeaseStreamsParams struct {
 }
 
 type LeaseStreamsRow struct {
-	ID             int64
-	LockToken      *uuid.UUID
-	TenantID       uuid.UUID
-	SubscriptionID uuid.UUID
-	EndpointID     uuid.UUID
-	Ordered        bool
-	StreamKey      string
-	Url            string
-	EndpointState  string
-	TimeoutMs      int32
-	MaxConcurrency int32
-	SigningKeyID   string
-	SigningSecret  []byte
-	LeaseMs        int64
+	ID                   int64
+	LockToken            *uuid.UUID
+	TenantID             uuid.UUID
+	SubscriptionID       uuid.UUID
+	EndpointID           uuid.UUID
+	Ordered              bool
+	StreamKey            string
+	Url                  string
+	EndpointState        string
+	TimeoutMs            int32
+	MaxConcurrency       int32
+	SigningKeyID         string
+	SigningSecret        []byte
+	CircuitState         string
+	CircuitProbeStreamID *int64
+	LeaseMs              int64
 }
 
 // The Postgres queue driver. See docs/design/delivery-engine.md §2.
@@ -361,6 +363,8 @@ func (q *Queries) LeaseStreams(ctx context.Context, arg LeaseStreamsParams) ([]L
 			&i.MaxConcurrency,
 			&i.SigningKeyID,
 			&i.SigningSecret,
+			&i.CircuitState,
+			&i.CircuitProbeStreamID,
 			&i.LeaseMs,
 		); err != nil {
 			return nil, err
@@ -371,6 +375,27 @@ func (q *Queries) LeaseStreams(ctx context.Context, arg LeaseStreamsParams) ([]L
 		return nil, err
 	}
 	return items, nil
+}
+
+const pauseStream = `-- name: PauseStream :exec
+UPDATE delivery_streams
+SET paused_delivery_id = $1, paused_at = now()
+WHERE id = $2 AND lock_token = $3
+`
+
+type PauseStreamParams struct {
+	DeliveryID *uuid.UUID
+	ID         int64
+	LockToken  *uuid.UUID
+}
+
+// An ORDERED stream's head died. Deliver N+1 before N and the subscriber sees
+// an order it cannot reconcile ("shipped" before "created"), so the stream
+// stops instead. The dead head is in the DLQ; replaying it puts it back at its
+// original seq and resumes the stream (see ReplayDelivery). Applied on release.
+func (q *Queries) PauseStream(ctx context.Context, arg PauseStreamParams) error {
+	_, err := q.db.Exec(ctx, pauseStream, arg.DeliveryID, arg.ID, arg.LockToken)
+	return err
 }
 
 const queueStats = `-- name: QueueStats :one
@@ -442,7 +467,14 @@ func (q *Queries) ReapExpiredLeases(ctx context.Context, maxStreams int32) ([]in
 
 const releaseStream = `-- name: ReleaseStream :execrows
 UPDATE delivery_streams ds
-SET state           = CASE WHEN h.t IS NULL THEN 'idle' ELSE 'ready' END,
+SET state           = CASE
+                        WHEN ds.paused_delivery_id IS NOT NULL THEN 'paused'
+                        WHEN h.t IS NULL THEN 'idle'
+                        WHEN e.circuit_state = 'open'
+                          OR (e.circuit_state = 'half_open' AND e.circuit_probe_stream_id IS DISTINCT FROM ds.id)
+                          THEN 'circuit_open'
+                        ELSE 'ready'
+                      END,
     next_visible_at = GREATEST(COALESCE(h.t, now()), now() + interval '1 millisecond' * $1::bigint),
     locked_by       = NULL,
     lock_token      = NULL,
@@ -452,8 +484,8 @@ FROM (
                 THEN (SELECT d.next_attempt_at FROM deliveries d WHERE d.stream_id = $2 ORDER BY d.seq LIMIT 1)
                 ELSE (SELECT min(d.next_attempt_at) FROM deliveries d WHERE d.stream_id = $2)
            END AS t
-) h
-WHERE ds.id = $2 AND ds.lock_token = $3 AND ds.state = 'leased'
+) h, endpoints e
+WHERE ds.id = $2 AND ds.lock_token = $3 AND ds.state = 'leased' AND e.id = ds.endpoint_id
 `
 
 type ReleaseStreamParams struct {
@@ -465,13 +497,18 @@ type ReleaseStreamParams struct {
 
 // Give the stream back and recompute when it is next runnable.
 //
-//	ordered:   the HEAD's due time (head-of-line semantics)
-//	unordered: the earliest due time of anything pending
-//	nothing pending: idle (drops out of the dequeue index entirely)
+//	paused (ordered head died)  → paused: out of the dequeue index until a
+//	                              replay resumes it
+//	nothing pending             → idle: out of the dequeue index entirely
+//	endpoint circuit open, or
+//	half-open and not the probe → circuit_open: parked until the breaker closes
+//	otherwise                   → ready, visible at:
+//	    ordered:   the HEAD's due time (head-of-line semantics)
+//	    unordered: the earliest due time of anything pending
 //
-// @not_before_ms pushes visibility out further (endpoint disabled, rate
-// limited). Fenced by lock_token, so a worker that lost its lease cannot
-// release a stream someone else now holds.
+// @not_before_ms pushes visibility out further (e.g. endpoint disabled).
+// Fenced by lock_token, so a worker that lost its lease cannot release a
+// stream someone else now holds.
 //
 // Race with ingest: an enqueue onto this stream either commits before this
 // statement (and is counted below) or blocks on this row and then sees

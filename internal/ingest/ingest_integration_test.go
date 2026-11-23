@@ -57,7 +57,8 @@ func newEnv(t *testing.T) *env {
 func (e *env) endpoint() uuid.UUID {
 	e.t.Helper()
 	ep, err := e.store.CreateEndpoint(context.Background(), gen.CreateEndpointParams{
-		ID: uuid.Must(uuid.NewV7()), TenantID: e.tenant, Url: "https://example.com/hook",
+		State: "enabled", // already verified: these tests are not about the handshake
+		ID:    uuid.Must(uuid.NewV7()), TenantID: e.tenant, Url: "https://example.com/hook",
 		TimeoutMs: 15000, MaxConcurrency: 8, SigningKeyID: "k_test", SigningSecret: make([]byte, 32),
 	})
 	if err != nil {

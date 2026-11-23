@@ -35,6 +35,8 @@ type DeliveriesHistory struct {
 	FinalState     string
 	DeadReason     *string
 	CompletedAt    time.Time
+	ReplayedAt     *time.Time
+	ReplayedAs     *uuid.UUID
 }
 
 type Delivery struct {
@@ -90,18 +92,29 @@ type DeliveryStream struct {
 }
 
 type Endpoint struct {
-	ID             uuid.UUID
-	TenantID       uuid.UUID
-	Url            string
-	Description    string
-	State          string
-	DisabledReason *string
-	TimeoutMs      int32
-	MaxConcurrency int32
-	SigningKeyID   string
-	SigningSecret  []byte
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID                    uuid.UUID
+	TenantID              uuid.UUID
+	Url                   string
+	Description           string
+	State                 string
+	DisabledReason        *string
+	TimeoutMs             int32
+	MaxConcurrency        int32
+	SigningKeyID          string
+	SigningSecret         []byte
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
+	VerifiedAt            *time.Time
+	VerificationAttempts  int32
+	VerificationNextAt    *time.Time
+	LastVerificationError *string
+	CircuitState          string
+	ConsecutiveFailures   int32
+	CircuitOpenedAt       *time.Time
+	CircuitNextProbeAt    *time.Time
+	CircuitCooldownMs     int64
+	CircuitProbeStreamID  *int64
+	CircuitProbeUntil     *time.Time
 }
 
 type Event struct {

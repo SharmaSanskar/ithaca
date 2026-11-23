@@ -48,7 +48,7 @@ func (f *fakeQueue) add(ordered bool, nmsgs int) *fakeStream {
 	id := int64(len(f.byID) + 1)
 	s := &fakeStream{lease: queue.Lease{
 		StreamID: id, Token: uuid.New(), Ordered: ordered, TTL: 30 * time.Second,
-		Endpoint: queue.Endpoint{State: "enabled", MaxConcurrency: 4, Timeout: 10 * time.Second},
+		Endpoint: queue.Endpoint{State: "enabled", Circuit: "closed", MaxConcurrency: 4, Timeout: 10 * time.Second},
 	}}
 	for i := range nmsgs {
 		s.msgs = append(s.msgs, queue.Message{DeliveryID: uuid.New(), Seq: int64(i + 1), Due: true})
@@ -95,7 +95,7 @@ func (f *fakeQueue) Renew(context.Context, *queue.Lease) error {
 	return nil
 }
 
-func (f *fakeQueue) Ack(_ context.Context, l *queue.Lease, rs []queue.Result) error {
+func (f *fakeQueue) Ack(_ context.Context, l *queue.Lease, rs []queue.Result) (queue.AckOutcome, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.acks[l.StreamID] = append(f.acks[l.StreamID], rs...)
@@ -113,7 +113,7 @@ func (f *fakeQueue) Ack(_ context.Context, l *queue.Lease, rs []queue.Result) er
 		}
 	}
 	s.msgs = kept
-	return nil
+	return queue.AckOutcome{}, nil
 }
 
 func (f *fakeQueue) Release(_ context.Context, l *queue.Lease, notBefore time.Duration) error {

@@ -17,19 +17,24 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/SharmaSanskar/ithaca/internal/auth"
+	"github.com/SharmaSanskar/ithaca/internal/dlq"
 	"github.com/SharmaSanskar/ithaca/internal/ingest"
 	"github.com/SharmaSanskar/ithaca/internal/platform/httpx"
 	"github.com/SharmaSanskar/ithaca/internal/store"
 	"github.com/SharmaSanskar/ithaca/internal/store/gen"
 )
 
-// ControlPlane serves /api/v1/{endpoints,subscriptions}.
+// ControlPlane serves /api/v1/{endpoints,subscriptions,dlq}.
 type ControlPlane struct {
-	store *store.Store
+	store    *store.Store
+	replayer *dlq.Replayer
 }
 
-// NewControlPlane builds the handler set.
-func NewControlPlane(s *store.Store) *ControlPlane { return &ControlPlane{store: s} }
+// NewControlPlane builds the handler set. replayRate is replayed deliveries
+// per second per endpoint.
+func NewControlPlane(s *store.Store, replayRate float64) *ControlPlane {
+	return &ControlPlane{store: s, replayer: &dlq.Replayer{Store: s, RatePerEndpoint: replayRate}}
+}
 
 // Routes mounts the control-plane routes. The caller supplies auth.
 func (c *ControlPlane) Routes(r chi.Router) {
@@ -38,12 +43,14 @@ func (c *ControlPlane) Routes(r chi.Router) {
 		r.Get("/", c.listEndpoints)
 		r.Get("/{id}", c.getEndpoint)
 		r.Delete("/{id}", c.disableEndpoint)
+		r.Post("/{id}/verify", c.verifyEndpoint)
 	})
 	r.Route("/subscriptions", func(r chi.Router) {
 		r.Post("/", c.createSubscription)
 		r.Get("/", c.listSubscriptions)
 		r.Delete("/{id}", c.disableSubscription)
 	})
+	c.DLQRoutes(r)
 }
 
 // ── endpoints ───────────────────────────────────────────────────────────────
@@ -57,6 +64,12 @@ type endpointJSON struct {
 	TimeoutMS      int32     `json:"timeout_ms"`
 	MaxConcurrency int32     `json:"max_concurrency"`
 	SigningKeyID   string    `json:"signing_key_id"`
+	// Verification handshake and circuit breaker.
+	VerifiedAt            *time.Time `json:"verified_at,omitempty"`
+	LastVerificationError *string    `json:"last_verification_error,omitempty"`
+	Circuit               string     `json:"circuit"`
+	ConsecutiveFailures   int32      `json:"consecutive_failures"`
+	CircuitNextProbeAt    *time.Time `json:"circuit_next_probe_at,omitempty"`
 	// Only present in the create response: the secret is shown exactly once.
 	SigningSecret string    `json:"signing_secret,omitempty"`
 	CreatedAt     time.Time `json:"created_at"`
@@ -67,6 +80,8 @@ func toEndpointJSON(e gen.Endpoint) endpointJSON {
 		ID: e.ID, URL: e.Url, Description: e.Description, State: e.State,
 		DisabledReason: e.DisabledReason, TimeoutMS: e.TimeoutMs, MaxConcurrency: e.MaxConcurrency,
 		SigningKeyID: e.SigningKeyID, CreatedAt: e.CreatedAt,
+		VerifiedAt: e.VerifiedAt, LastVerificationError: e.LastVerificationError,
+		Circuit: e.CircuitState, ConsecutiveFailures: e.ConsecutiveFailures, CircuitNextProbeAt: e.CircuitNextProbeAt,
 	}
 }
 
@@ -116,10 +131,13 @@ func (c *ControlPlane) createEndpoint(w http.ResponseWriter, r *http.Request) {
 	_, _ = rand.Read(kid)
 
 	e, err := c.store.CreateEndpoint(r.Context(), gen.CreateEndpointParams{
-		ID:             uuid.Must(uuid.NewV7()),
-		TenantID:       auth.TenantFrom(r.Context()),
-		Url:            req.URL,
-		Description:    req.Description,
+		ID:          uuid.Must(uuid.NewV7()),
+		TenantID:    auth.TenantFrom(r.Context()),
+		Url:         req.URL,
+		Description: req.Description,
+		// Nothing is delivered until the endpoint echoes a signed challenge;
+		// see internal/verify.
+		State:          "pending_verification",
 		TimeoutMs:      timeout,
 		MaxConcurrency: maxConc,
 		SigningKeyID:   "k_" + hex.EncodeToString(kid),
@@ -184,6 +202,27 @@ func (c *ControlPlane) disableEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, toEndpointJSON(e))
+}
+
+// verifyEndpoint (re)starts the verification handshake: after a failed one, or
+// to re-enable a disabled endpoint. Delivery resumes once it passes.
+func (c *ControlPlane) verifyEndpoint(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	e, err := c.store.RequestVerification(r.Context(), gen.RequestVerificationParams{
+		TenantID: auth.TenantFrom(r.Context()), ID: id,
+	})
+	if store.IsNoRows(err) {
+		httpx.WriteError(w, r, httpx.ErrConflict.WithMessage("Endpoint not found, or already verified and enabled."))
+		return
+	}
+	if err != nil {
+		httpx.WriteError(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusAccepted, toEndpointJSON(e))
 }
 
 // validateEndpointURL is a SYNTAX check only. It deliberately does not resolve

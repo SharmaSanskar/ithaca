@@ -33,6 +33,9 @@ type Endpoint struct {
 	MaxConcurrency int
 	KeyID          string
 	Secret         []byte
+	// Circuit is the breaker state at lease time: "closed", "open" or
+	// "half_open".
+	Circuit string
 }
 
 // Lease is exclusive, time-bounded ownership of one stream.
@@ -48,6 +51,9 @@ type Lease struct {
 	WorkerID       string
 	TTL            time.Duration
 	AcquiredAt     time.Time
+	// IsProbe: the endpoint's circuit is half-open and this is the one stream
+	// allowed to test it. The holder delivers exactly one message.
+	IsProbe bool
 }
 
 // LeaseRequest asks for up to Max streams.
@@ -111,6 +117,17 @@ type Result struct {
 	Record     *AttemptRecord // nil = nothing to log
 }
 
+// AckOutcome reports side effects of an ack beyond the deliveries themselves.
+type AckOutcome struct {
+	// Breaker is the circuit transition this ack caused: "", "opened",
+	// "reopened" or "closed".
+	Breaker string
+	// AutoDisabled: the endpoint answered 410 Gone and was disabled.
+	AutoDisabled bool
+	// Paused: an ordered stream's head died and the stream stopped.
+	Paused bool
+}
+
 // Stats are queue-wide gauges.
 type Stats struct {
 	RunnableStreams   int64
@@ -129,7 +146,7 @@ type Queue interface {
 	// Renew extends a lease. ErrLeaseLost if it is gone.
 	Renew(ctx context.Context, l *Lease) error
 	// Ack records results in one fenced transaction. ErrLeaseLost if fenced out.
-	Ack(ctx context.Context, l *Lease, results []Result) error
+	Ack(ctx context.Context, l *Lease, results []Result) (AckOutcome, error)
 	// Release returns the stream, invisible for at least notBefore.
 	Release(ctx context.Context, l *Lease, notBefore time.Duration) error
 	// Reap reclaims up to limit expired leases and returns how many.

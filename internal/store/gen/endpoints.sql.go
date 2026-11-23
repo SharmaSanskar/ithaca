@@ -12,11 +12,11 @@ import (
 )
 
 const createEndpoint = `-- name: CreateEndpoint :one
-INSERT INTO endpoints (id, tenant_id, url, description, timeout_ms, max_concurrency,
+INSERT INTO endpoints (id, tenant_id, url, description, state, timeout_ms, max_concurrency,
                        signing_key_id, signing_secret)
-VALUES ($1, $2, $3, $4, $5, $6,
-        $7, $8)
-RETURNING id, tenant_id, url, description, state, disabled_reason, timeout_ms, max_concurrency, signing_key_id, signing_secret, created_at, updated_at
+VALUES ($1, $2, $3, $4, $5, $6, $7,
+        $8, $9)
+RETURNING id, tenant_id, url, description, state, disabled_reason, timeout_ms, max_concurrency, signing_key_id, signing_secret, created_at, updated_at, verified_at, verification_attempts, verification_next_at, last_verification_error, circuit_state, consecutive_failures, circuit_opened_at, circuit_next_probe_at, circuit_cooldown_ms, circuit_probe_stream_id, circuit_probe_until
 `
 
 type CreateEndpointParams struct {
@@ -24,6 +24,7 @@ type CreateEndpointParams struct {
 	TenantID       uuid.UUID
 	Url            string
 	Description    string
+	State          string
 	TimeoutMs      int32
 	MaxConcurrency int32
 	SigningKeyID   string
@@ -36,6 +37,7 @@ func (q *Queries) CreateEndpoint(ctx context.Context, arg CreateEndpointParams) 
 		arg.TenantID,
 		arg.Url,
 		arg.Description,
+		arg.State,
 		arg.TimeoutMs,
 		arg.MaxConcurrency,
 		arg.SigningKeyID,
@@ -55,12 +57,23 @@ func (q *Queries) CreateEndpoint(ctx context.Context, arg CreateEndpointParams) 
 		&i.SigningSecret,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.VerifiedAt,
+		&i.VerificationAttempts,
+		&i.VerificationNextAt,
+		&i.LastVerificationError,
+		&i.CircuitState,
+		&i.ConsecutiveFailures,
+		&i.CircuitOpenedAt,
+		&i.CircuitNextProbeAt,
+		&i.CircuitCooldownMs,
+		&i.CircuitProbeStreamID,
+		&i.CircuitProbeUntil,
 	)
 	return i, err
 }
 
 const getEndpoint = `-- name: GetEndpoint :one
-SELECT id, tenant_id, url, description, state, disabled_reason, timeout_ms, max_concurrency, signing_key_id, signing_secret, created_at, updated_at FROM endpoints
+SELECT id, tenant_id, url, description, state, disabled_reason, timeout_ms, max_concurrency, signing_key_id, signing_secret, created_at, updated_at, verified_at, verification_attempts, verification_next_at, last_verification_error, circuit_state, consecutive_failures, circuit_opened_at, circuit_next_probe_at, circuit_cooldown_ms, circuit_probe_stream_id, circuit_probe_until FROM endpoints
 WHERE tenant_id = $1 AND id = $2
 `
 
@@ -85,12 +98,23 @@ func (q *Queries) GetEndpoint(ctx context.Context, arg GetEndpointParams) (Endpo
 		&i.SigningSecret,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.VerifiedAt,
+		&i.VerificationAttempts,
+		&i.VerificationNextAt,
+		&i.LastVerificationError,
+		&i.CircuitState,
+		&i.ConsecutiveFailures,
+		&i.CircuitOpenedAt,
+		&i.CircuitNextProbeAt,
+		&i.CircuitCooldownMs,
+		&i.CircuitProbeStreamID,
+		&i.CircuitProbeUntil,
 	)
 	return i, err
 }
 
 const listEndpoints = `-- name: ListEndpoints :many
-SELECT id, tenant_id, url, description, state, disabled_reason, timeout_ms, max_concurrency, signing_key_id, signing_secret, created_at, updated_at FROM endpoints
+SELECT id, tenant_id, url, description, state, disabled_reason, timeout_ms, max_concurrency, signing_key_id, signing_secret, created_at, updated_at, verified_at, verification_attempts, verification_next_at, last_verification_error, circuit_state, consecutive_failures, circuit_opened_at, circuit_next_probe_at, circuit_cooldown_ms, circuit_probe_stream_id, circuit_probe_until FROM endpoints
 WHERE tenant_id = $1
 ORDER BY id
 LIMIT 500
@@ -118,6 +142,17 @@ func (q *Queries) ListEndpoints(ctx context.Context, tenantID uuid.UUID) ([]Endp
 			&i.SigningSecret,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.VerifiedAt,
+			&i.VerificationAttempts,
+			&i.VerificationNextAt,
+			&i.LastVerificationError,
+			&i.CircuitState,
+			&i.ConsecutiveFailures,
+			&i.CircuitOpenedAt,
+			&i.CircuitNextProbeAt,
+			&i.CircuitCooldownMs,
+			&i.CircuitProbeStreamID,
+			&i.CircuitProbeUntil,
 		); err != nil {
 			return nil, err
 		}
@@ -133,7 +168,7 @@ const setEndpointState = `-- name: SetEndpointState :one
 UPDATE endpoints
 SET state = $1, disabled_reason = $2, updated_at = now()
 WHERE tenant_id = $3 AND id = $4
-RETURNING id, tenant_id, url, description, state, disabled_reason, timeout_ms, max_concurrency, signing_key_id, signing_secret, created_at, updated_at
+RETURNING id, tenant_id, url, description, state, disabled_reason, timeout_ms, max_concurrency, signing_key_id, signing_secret, created_at, updated_at, verified_at, verification_attempts, verification_next_at, last_verification_error, circuit_state, consecutive_failures, circuit_opened_at, circuit_next_probe_at, circuit_cooldown_ms, circuit_probe_stream_id, circuit_probe_until
 `
 
 type SetEndpointStateParams struct {
@@ -164,6 +199,17 @@ func (q *Queries) SetEndpointState(ctx context.Context, arg SetEndpointStatePara
 		&i.SigningSecret,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.VerifiedAt,
+		&i.VerificationAttempts,
+		&i.VerificationNextAt,
+		&i.LastVerificationError,
+		&i.CircuitState,
+		&i.ConsecutiveFailures,
+		&i.CircuitOpenedAt,
+		&i.CircuitNextProbeAt,
+		&i.CircuitCooldownMs,
+		&i.CircuitProbeStreamID,
+		&i.CircuitProbeUntil,
 	)
 	return i, err
 }

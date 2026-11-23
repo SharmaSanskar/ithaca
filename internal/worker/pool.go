@@ -279,8 +279,14 @@ func (p *Pool) handle(ctx context.Context, l *queue.Lease) {
 		}
 	}()
 
-	if l.Endpoint.State != "enabled" {
+	switch {
+	case l.Endpoint.State != "enabled":
 		notBefore = p.cfg.DisabledRecheck
+		return
+	case l.Endpoint.Circuit == "open", l.Endpoint.Circuit == "half_open" && !l.IsProbe:
+		// The endpoint is presumed down. Release without delivering: the
+		// release parks the stream (state circuit_open) until the breaker
+		// closes. No HTTP request, no attempt consumed, slot freed at once.
 		return
 	}
 
@@ -309,6 +315,12 @@ func (p *Pool) handle(ctx context.Context, l *queue.Lease) {
 		// measured 17% duplicates in TestKilledDispatcherLosesNothing;
 		// chunking by the lane's concurrency bounds it to one chunk per lane.
 		chunk := ackChunk(l)
+		if l.IsProbe {
+			// Half-open: exactly ONE request decides the endpoint's fate.
+			// Sending a batch would be the thundering herd the breaker exists
+			// to prevent, aimed at an endpoint that may be barely alive.
+			msgs, chunk = msgs[:1], 1
+		}
 		for start := 0; start < len(msgs); start += chunk {
 			part := msgs[start:min(start+chunk, len(msgs))]
 			results, stoppedEarly := p.deliverBatch(lctx, l, part)
@@ -322,7 +334,7 @@ func (p *Pool) handle(ctx context.Context, l *queue.Lease) {
 				return
 			}
 		}
-		if len(msgs) < p.cfg.DrainBatch {
+		if l.IsProbe || len(msgs) < p.cfg.DrainBatch {
 			return
 		}
 	}
@@ -355,7 +367,10 @@ func (p *Pool) deliverBatch(ctx context.Context, l *queue.Lease, msgs []queue.Me
 				return out, true
 			}
 			out = append(out, r)
-			if r.Disposition != queue.Succeeded && r.Disposition != queue.Dead {
+			if r.Disposition != queue.Succeeded {
+				// A retry or deferral blocks the head; a dead head pauses the
+				// whole stream (see PauseStream). Either way nothing behind
+				// it may go first.
 				return out, true
 			}
 		}
@@ -412,10 +427,11 @@ func (p *Pool) ack(ctx context.Context, l *queue.Lease, results []queue.Result, 
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 	defer cancel()
 	start := time.Now()
-	err := p.q.Ack(ctx, l, results)
+	outcome, err := p.q.Ack(ctx, l, results)
 	p.m.AckDuration.Observe(time.Since(start).Seconds())
 	switch {
 	case err == nil:
+		p.reportAckOutcome(l, outcome)
 		for _, r := range results {
 			switch r.Disposition {
 			case queue.Succeeded:
@@ -441,6 +457,22 @@ func (p *Pool) ack(ctx context.Context, l *queue.Lease, results []queue.Result, 
 
 // release must also survive cancellation: a stream released during shutdown is
 // redelivered by another dispatcher in milliseconds instead of after the TTL.
+func (p *Pool) reportAckOutcome(l *queue.Lease, o queue.AckOutcome) {
+	if o.Breaker != "" {
+		p.m.BreakerTransitions.WithLabelValues(o.Breaker).Inc()
+		p.log.Warn("circuit breaker "+o.Breaker, "endpoint", l.EndpointID, "stream", l.StreamID)
+	}
+	if o.AutoDisabled {
+		p.m.AutoDisabled.Inc()
+		p.log.Warn("endpoint auto-disabled: 410 Gone", "endpoint", l.EndpointID)
+	}
+	if o.Paused {
+		p.m.StreamsPaused.Inc()
+		p.log.Warn("ordered stream paused: its head was dead-lettered; replay it to resume",
+			"endpoint", l.EndpointID, "stream", l.StreamID, "stream_key", l.StreamKey)
+	}
+}
+
 func (p *Pool) release(ctx context.Context, l *queue.Lease, notBefore time.Duration) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 	defer cancel()

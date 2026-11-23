@@ -34,7 +34,7 @@ func TestControlPlaneLifecycle(t *testing.T) {
 	r := chi.NewRouter()
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(auth.NewAuthenticator(s, time.Minute).Middleware)
-		api.NewControlPlane(s).Routes(r)
+		api.NewControlPlane(s, 50).Routes(r)
 	})
 	srv := httptest.NewServer(r)
 	defer srv.Close()

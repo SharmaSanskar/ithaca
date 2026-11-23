@@ -32,8 +32,11 @@ type Behavior struct {
 	FailRate   float64 `json:"fail_rate"`   // probability [0,1] of answering FailStatus
 	FailStatus int     `json:"fail_status"` // default 503
 	FailFirst  int     `json:"fail_first"`  // fail the first N attempts of EVERY delivery
-	Hang       bool    `json:"hang"`        // never answer (until the client gives up)
-	RetryAfter int     `json:"retry_after"` // seconds; sent with a 429 FailStatus
+	// FailRequests fails the first N requests to this sink, whatever they
+	// are, then behaves normally.
+	FailRequests int  `json:"fail_requests"`
+	Hang         bool `json:"hang"`        // never answer (until the client gives up)
+	RetryAfter   int  `json:"retry_after"` // seconds; sent with a 429 FailStatus
 }
 
 // Received is one recorded request.
@@ -59,13 +62,17 @@ type Receiver struct {
 	log      []Received
 	keepLog  bool
 	counts   map[string]*SinkStats
+	inFlight map[string]int
+	maxInFl  map[string]int
+	arrivals map[string]int64 // counted at arrival, for FailRequests
 }
 
 // SinkStats is a per-sink running tally (kept even when the log is off).
 type SinkStats struct {
-	Requests  int64 `json:"requests"`
-	Succeeded int64 `json:"succeeded"`
-	Failed    int64 `json:"failed"`
+	Requests      int64 `json:"requests"`
+	Succeeded     int64 `json:"succeeded"`
+	Failed        int64 `json:"failed"`
+	Verifications int64 `json:"verifications"`
 }
 
 // New creates a receiver. The seed makes failure injection reproducible: a
@@ -79,6 +86,9 @@ func New(seed uint64, keepLog bool) *Receiver {
 		rng:      rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15)), //nolint:gosec // test fixture
 		keepLog:  keepLog,
 		counts:   map[string]*SinkStats{},
+		inFlight: map[string]int{},
+		maxInFl:  map[string]int{},
+		arrivals: map[string]int64{},
 	}
 }
 
@@ -122,6 +132,20 @@ func (r *Receiver) Delivered() map[string]int {
 		}
 	}
 	return out
+}
+
+// MaxConcurrent returns the most requests a sink ever had in flight at once.
+func (r *Receiver) MaxConcurrent(sink string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.maxInFl[sink]
+}
+
+// ResetMaxConcurrent starts a new high-water mark for a sink.
+func (r *Receiver) ResetMaxConcurrent(sink string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.maxInFl[sink] = r.inFlight[sink]
 }
 
 // Handler serves the sink and control routes.
@@ -174,6 +198,27 @@ func (r *Receiver) behavior(id string) Behavior {
 func (r *Receiver) serveSink(w http.ResponseWriter, req *http.Request) {
 	sink := chi.URLParam(req, "id")
 	body, _ := io.ReadAll(io.LimitReader(req.Body, 2<<20))
+
+	// The verification handshake: a well-behaved receiver echoes the
+	// challenge. Answered before any scripted misbehavior, because the demo
+	// sinks are meant to verify instantly and THEN be broken on purpose.
+	if c := req.Header.Get("Ithaca-Challenge"); c != "" {
+		r.mu.Lock()
+		r.stats(sink).Verifications++
+		r.mu.Unlock()
+		writeJSON(w, http.StatusOK, map[string]string{"challenge": c})
+		return
+	}
+
+	r.mu.Lock()
+	r.inFlight[sink]++
+	r.maxInFl[sink] = max(r.maxInFl[sink], r.inFlight[sink])
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		r.inFlight[sink]--
+		r.mu.Unlock()
+	}()
 	rec := Received{
 		At:         time.Now(),
 		Sink:       sink,
@@ -197,6 +242,8 @@ func (r *Receiver) serveSink(w http.ResponseWriter, req *http.Request) {
 	}
 	r.attempts[rec.DeliveryID]++
 	seen := r.attempts[rec.DeliveryID]
+	r.arrivals[sink]++
+	sinkReqs := r.arrivals[sink]
 	status := b.Status
 	if status == 0 {
 		status = http.StatusOK
@@ -205,7 +252,7 @@ func (r *Receiver) serveSink(w http.ResponseWriter, req *http.Request) {
 	if failStatus == 0 {
 		failStatus = http.StatusServiceUnavailable
 	}
-	if seen <= b.FailFirst || (b.FailRate > 0 && r.rng.Float64() < b.FailRate) {
+	if seen <= b.FailFirst || sinkReqs <= int64(b.FailRequests) || (b.FailRate > 0 && r.rng.Float64() < b.FailRate) {
 		status = failStatus
 	}
 	if rec.SignatureValid != nil && !*rec.SignatureValid {
@@ -232,11 +279,7 @@ func (r *Receiver) serveSink(w http.ResponseWriter, req *http.Request) {
 
 	rec.Status = status
 	r.mu.Lock()
-	st := r.counts[sink]
-	if st == nil {
-		st = &SinkStats{}
-		r.counts[sink] = st
-	}
+	st := r.stats(sink)
 	st.Requests++
 	if status >= 200 && status < 300 {
 		st.Succeeded++
@@ -247,6 +290,16 @@ func (r *Receiver) serveSink(w http.ResponseWriter, req *http.Request) {
 		r.log = append(r.log, rec)
 	}
 	r.mu.Unlock()
+}
+
+// stats returns a sink's tally, creating it. Caller holds r.mu.
+func (r *Receiver) stats(sink string) *SinkStats {
+	st := r.counts[sink]
+	if st == nil {
+		st = &SinkStats{}
+		r.counts[sink] = st
+	}
+	return st
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) bool {

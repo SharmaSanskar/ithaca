@@ -20,6 +20,12 @@ type Metrics struct {
 	AttemptLatency prometheus.Histogram
 	EndToEnd       prometheus.Histogram
 
+	BreakerTransitions *prometheus.CounterVec
+	BreakerParked      prometheus.Counter
+	BreakerProbes      prometheus.Counter
+	AutoDisabled       prometheus.Counter
+	StreamsPaused      prometheus.Counter
+
 	RunnableStreams   prometheus.Gauge
 	LeasedStreams     prometheus.Gauge
 	PendingDeliveries prometheus.Gauge
@@ -76,6 +82,24 @@ func NewMetrics(reg prometheus.Registerer, slots *Slots) *Metrics {
 			Help:    "From event ingest to successful delivery (includes queue wait and retries).",
 			Buckets: []float64{.01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60, 300, 1800, 7200},
 		}),
+		BreakerTransitions: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: ns, Subsystem: "breaker", Name: "transitions_total",
+			Help: "Circuit-breaker transitions: opened, reopened (probe failed), closed (probe succeeded).",
+		}, []string{"transition"}),
+		BreakerParked: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: ns, Subsystem: "breaker", Name: "streams_parked_total",
+			Help: "Streams parked because their endpoint's circuit was open.",
+		}),
+		BreakerProbes: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: ns, Subsystem: "breaker", Name: "probes_started_total", Help: "Half-open probes started.",
+		}),
+		AutoDisabled: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: ns, Subsystem: "endpoint", Name: "auto_disabled_total", Help: "Endpoints disabled after a 410 Gone.",
+		}),
+		StreamsPaused: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: ns, Subsystem: "queue", Name: "streams_paused_total",
+			Help: "Ordered streams paused because their head was dead-lettered.",
+		}),
 		RunnableStreams: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: ns, Subsystem: "queue", Name: "runnable_streams", Help: "Streams ready to lease now.",
 		}),
@@ -92,6 +116,7 @@ func NewMetrics(reg prometheus.Registerer, slots *Slots) *Metrics {
 	}
 	reg.MustRegister(m.LeaseBatch, m.DequeueErrors, m.LeasesLost, m.Reaped, m.Panics, m.AckDuration,
 		m.AckErrors, m.Attempts, m.Completed, m.AttemptLatency, m.EndToEnd,
+		m.BreakerTransitions, m.BreakerParked, m.BreakerProbes, m.AutoDisabled, m.StreamsPaused,
 		m.RunnableStreams, m.LeasedStreams, m.PendingDeliveries, m.OldestPending)
 	if slots != nil {
 		reg.MustRegister(

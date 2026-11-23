@@ -6,11 +6,15 @@ package pg
 import (
 	"context"
 	"fmt"
+	"math/rand/v2"
+	"net/http"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/SharmaSanskar/ithaca/internal/breaker"
 	"github.com/SharmaSanskar/ithaca/internal/queue"
 	"github.com/SharmaSanskar/ithaca/internal/store"
 	"github.com/SharmaSanskar/ithaca/internal/store/gen"
@@ -18,12 +22,39 @@ import (
 
 // Driver implements queue.Queue on Postgres.
 type Driver struct {
-	s   *store.Store
-	now func() time.Time
+	s       *store.Store
+	now     func() time.Time
+	breaker breaker.Policy
+	// unparkSpread is the window over which a recovered endpoint's parked
+	// streams are reopened (see UnparkEndpointStreams).
+	unparkSpread time.Duration
+
+	mu  sync.Mutex
+	rng *rand.Rand
+}
+
+// Option configures a Driver.
+type Option func(*Driver)
+
+// WithBreaker sets the circuit-breaker policy.
+func WithBreaker(p breaker.Policy) Option { return func(d *Driver) { d.breaker = p } }
+
+// WithUnparkSpread sets how widely reopened streams are staggered.
+func WithUnparkSpread(spread time.Duration) Option {
+	return func(d *Driver) { d.unparkSpread = spread }
 }
 
 // New returns a driver over the given store.
-func New(s *store.Store) *Driver { return &Driver{s: s, now: time.Now} }
+func New(s *store.Store, opts ...Option) *Driver {
+	d := &Driver{
+		s: s, now: time.Now, breaker: breaker.Default, unparkSpread: 5 * time.Second,
+		rng: rand.New(rand.NewPCG(rand.Uint64(), rand.Uint64())), //nolint:gosec // jitter, not security
+	}
+	for _, o := range opts {
+		o(d)
+	}
+	return d
+}
 
 var _ queue.Queue = (*Driver)(nil)
 
@@ -57,10 +88,12 @@ func (d *Driver) Lease(ctx context.Context, req queue.LeaseRequest) ([]*queue.Le
 				MaxConcurrency: int(r.MaxConcurrency),
 				KeyID:          r.SigningKeyID,
 				Secret:         r.SigningSecret,
+				Circuit:        r.CircuitState,
 			},
 			WorkerID:   req.WorkerID,
 			TTL:        time.Duration(r.LeaseMs) * time.Millisecond,
 			AcquiredAt: now,
+			IsProbe:    r.CircuitState == string(breaker.HalfOpen) && r.CircuitProbeStreamID != nil && *r.CircuitProbeStreamID == r.ID,
 		})
 	}
 	return out, nil
@@ -69,7 +102,11 @@ func (d *Driver) Lease(ctx context.Context, req queue.LeaseRequest) ([]*queue.Le
 // Fetch implements queue.Queue.
 func (d *Driver) Fetch(ctx context.Context, l *queue.Lease, limit int) ([]queue.Message, error) {
 	max := int32(limit) //nolint:gosec // bounded by config
-	if l.Ordered {
+	// A half-open probe takes the stream's first pending message whether or
+	// not it is due yet. Waiting out a delivery's own backoff would stall the
+	// probe, and with it the whole breaker: the probe IS the scheduling
+	// decision.
+	if l.Ordered || l.IsProbe {
 		rows, err := d.s.FetchOrdered(ctx, gen.FetchOrderedParams{StreamID: l.StreamID, MaxRows: max})
 		if err != nil {
 			return nil, fmt.Errorf("fetch ordered: %w", err)
@@ -77,7 +114,7 @@ func (d *Driver) Fetch(ctx context.Context, l *queue.Lease, limit int) ([]queue.
 		out := make([]queue.Message, len(rows))
 		for i, r := range rows {
 			out[i] = queue.Message{
-				DeliveryID: r.ID, EventID: r.EventID, Seq: r.Seq, Attempt: r.Attempt, Due: r.Due,
+				DeliveryID: r.ID, EventID: r.EventID, Seq: r.Seq, Attempt: r.Attempt, Due: r.Due || l.IsProbe,
 				EventType: r.EventType, Payload: r.Payload, Traceparent: deref(r.Traceparent),
 				EventCreatedAt: r.EventCreatedAt,
 			}
@@ -120,36 +157,60 @@ func (d *Driver) Renew(ctx context.Context, l *queue.Lease) error {
 //  2. insert every attempt row
 //  3. move terminal deliveries to history
 //  4. reschedule the rest
+//  5. ordered stream whose head died → pause it
+//  6. 410 Gone → auto-disable the endpoint
+//  7. feed the circuit breaker
+//
+// Steps 5-7 happen in the same transaction as the ack that observed them, so
+// endpoint state can never disagree with the delivery record.
 //
 // synchronous_commit is off for this transaction only. Losing the last few
 // hundred milliseconds of acks in a database crash means redelivering a
 // handful of messages, which at-least-once already permits. Ingest keeps full
 // durability: losing an ingest commit would lose a customer's event.
-func (d *Driver) Ack(ctx context.Context, l *queue.Lease, results []queue.Result) error {
+func (d *Driver) Ack(ctx context.Context, l *queue.Lease, results []queue.Result) (queue.AckOutcome, error) {
+	var out queue.AckOutcome
 	if len(results) == 0 {
-		return nil
+		return out, nil
 	}
 	var att attemptCols
 	var done completeCols
 	var resched rescheduleCols
+	var obs breaker.Observation
+	obs.Stream = l.StreamID
+	var deadHead *uuid.UUID
+	gone := false
 	for _, r := range results {
 		if r.Record != nil {
 			att.add(r.DeliveryID, r.Record)
+			switch health(r.Record) {
+			case healthy:
+				obs.Healthy++
+			case failed:
+				obs.Failed++
+			}
+			if r.Record.StatusCode == http.StatusGone {
+				gone = true
+			}
 		}
 		switch r.Disposition {
 		case queue.Succeeded:
 			done.add(r, "succeeded")
 		case queue.Dead:
 			done.add(r, "dead")
+			if l.Ordered && deadHead == nil {
+				id := r.DeliveryID
+				deadHead = &id
+			}
 		case queue.Retry, queue.Defer:
 			resched.add(r)
 		default:
-			return fmt.Errorf("ack: delivery %s has no disposition", r.DeliveryID)
+			return out, fmt.Errorf("ack: delivery %s has no disposition", r.DeliveryID)
 		}
 	}
 
 	token := l.Token
-	return pgx.BeginFunc(ctx, d.s.Pool, func(tx pgx.Tx) error {
+	err := pgx.BeginFunc(ctx, d.s.Pool, func(tx pgx.Tx) error {
 		q := d.s.WithTx(tx)
 		if _, err := tx.Exec(ctx, "SET LOCAL synchronous_commit = off"); err != nil {
 			return err
@@ -175,8 +236,141 @@ func (d *Driver) Ack(ctx context.Context, l *queue.Lease, results []queue.Result
 				return fmt.Errorf("reschedule deliveries: %w", err)
 			}
 		}
+		if deadHead != nil {
+			if err := q.PauseStream(ctx, gen.PauseStreamParams{ID: l.StreamID, LockToken: &token, DeliveryID: deadHead}); err != nil {
+				return fmt.Errorf("pause stream: %w", err)
+			}
+			out.Paused = true
+		}
+		if gone {
+			reason := "endpoint returned 410 Gone"
+			if err := q.AutoDisableEndpoint(ctx, gen.AutoDisableEndpointParams{ID: l.EndpointID, Reason: &reason}); err != nil {
+				return fmt.Errorf("auto-disable: %w", err)
+			}
+			out.AutoDisabled = true
+		}
+		t, err := d.observe(ctx, q, l, obs)
+		out.Breaker = string(t)
+		return err
+	})
+	return out, err
+}
+
+// observe feeds one ack's observation to the endpoint's breaker.
+//
+// The healthy path — a closed circuit and nothing but successes — must stay
+// cheap at thousands of acks per second, so it never locks the endpoint row:
+// ResetEndpointFailures matches nothing (and locks nothing) unless there is
+// actually a failure count to clear. Only failures and probe results take the
+// row lock and run the state machine.
+func (d *Driver) observe(ctx context.Context, q *gen.Queries, l *queue.Lease, o breaker.Observation) (breaker.Transition, error) {
+	if o.Healthy == 0 && o.Failed == 0 {
+		return breaker.None, nil
+	}
+	if o.Failed == 0 && !l.IsProbe && l.Endpoint.Circuit == string(breaker.Closed) {
+		return breaker.None, q.ResetEndpointFailures(ctx, l.EndpointID)
+	}
+
+	row, err := q.LockEndpointCircuit(ctx, l.EndpointID)
+	if err != nil {
+		return breaker.None, fmt.Errorf("lock endpoint circuit: %w", err)
+	}
+	cur := breaker.State{
+		Circuit:     breaker.Circuit(row.CircuitState),
+		Failures:    int(row.ConsecutiveFailures),
+		Cooldown:    time.Duration(row.CircuitCooldownMs) * time.Millisecond,
+		ProbeStream: row.CircuitProbeStreamID,
+	}
+	d.mu.Lock()
+	next, t, probeIn := breaker.Next(cur, o, d.breaker, d.rng)
+	d.mu.Unlock()
+	if next == cur {
+		return breaker.None, nil
+	}
+	if err := q.UpdateEndpointCircuit(ctx, gen.UpdateEndpointCircuitParams{
+		ID:                  l.EndpointID,
+		CircuitState:        string(next.Circuit),
+		ConsecutiveFailures: int32(min(next.Failures, 1<<30)), //nolint:gosec // clamped
+		CooldownMs:          next.Cooldown.Milliseconds(),
+		NextProbeInMs:       probeIn.Milliseconds(),
+	}); err != nil {
+		return breaker.None, fmt.Errorf("update endpoint circuit: %w", err)
+	}
+	if t == breaker.Recovered {
+		if _, err := q.UnparkEndpointStreams(ctx, gen.UnparkEndpointStreamsParams{
+			EndpointID: l.EndpointID, SpreadMs: d.unparkSpread.Milliseconds(),
+		}); err != nil {
+			return breaker.None, fmt.Errorf("unpark streams: %w", err)
+		}
+	}
+	return t, nil
+}
+
+type endpointHealth int
+
+const (
+	neutral endpointHealth = iota
+	healthy
+	failed
+)
+
+// health classifies one attempt for the breaker. Any HTTP answer below 500
+// proves the endpoint is up (a 404 is a config problem, not an outage),
+// except 429, which is the endpoint asking for less traffic, not failing.
+// No answer at all (timeout, refused, reset) is a failure; an SSRF block or a
+// bad URL says nothing about the endpoint's health.
+func health(r *queue.AttemptRecord) endpointHealth {
+	switch {
+	case r.StatusCode == http.StatusTooManyRequests:
+		return neutral
+	case r.StatusCode >= 500:
+		return failed
+	case r.StatusCode > 0:
+		return healthy
+	case r.Outcome == "retryable" || r.Outcome == "timeout":
+		return failed
+	default:
+		return neutral
+	}
+}
+
+// BreakerTick runs the breaker's periodic work. Safe to run in every
+// dispatcher concurrently.
+//
+//  1. park runnable streams of open endpoints
+//  2. send half-open probes that never reported back back to open
+//  3. for each open endpoint whose cooldown elapsed, unpark exactly one
+//     stream and mark it the probe (SKIP LOCKED: one probe per endpoint
+//     across all dispatchers)
+func (d *Driver) BreakerTick(ctx context.Context) (parked, expired, probes int64, err error) {
+	if parked, err = d.s.ParkOpenEndpointStreams(ctx); err != nil {
+		return 0, 0, 0, fmt.Errorf("park streams: %w", err)
+	}
+	if expired, err = d.s.ExpireStaleProbes(ctx); err != nil {
+		return parked, 0, 0, fmt.Errorf("expire probes: %w", err)
+	}
+	err = pgx.BeginFunc(ctx, d.s.Pool, func(tx pgx.Tx) error {
+		q := d.s.WithTx(tx)
+		due, cerr := q.ClaimDueProbes(ctx)
+		if cerr != nil {
+			return fmt.Errorf("claim probes: %w", cerr)
+		}
+		for _, ep := range due {
+			stream, perr := q.PickProbeStream(ctx, ep.ID)
+			if store.IsNoRows(perr) {
+				continue // nothing queued for it; stay open until work arrives
+			}
+			if perr != nil {
+				return fmt.Errorf("pick probe stream: %w", perr)
+			}
+			if serr := q.StartProbe(ctx, gen.StartProbeParams{EndpointID: ep.ID, StreamID: stream}); serr != nil {
+				return fmt.Errorf("start probe: %w", serr)
+			}
+			probes++
+		}
 		return nil
 	})
+	return parked, expired, probes, err
 }
 
 // Release implements queue.Queue.

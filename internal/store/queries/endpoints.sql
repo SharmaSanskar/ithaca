@@ -1,7 +1,7 @@
 -- name: CreateEndpoint :one
-INSERT INTO endpoints (id, tenant_id, url, description, timeout_ms, max_concurrency,
+INSERT INTO endpoints (id, tenant_id, url, description, state, timeout_ms, max_concurrency,
                        signing_key_id, signing_secret)
-VALUES (@id, @tenant_id, @url, @description, @timeout_ms, @max_concurrency,
+VALUES (@id, @tenant_id, @url, @description, @state, @timeout_ms, @max_concurrency,
         @signing_key_id, @signing_secret)
 RETURNING *;
 

@@ -21,18 +21,19 @@ the product cannot exist without one.
 
 ## Status
 
-**Phase 2 — Queue, worker pool, delivery.** Events are leased by stream, delivered by a bounded
-worker pool with signed requests through an SSRF-guarded client, retried with full-jitter backoff,
-and dead-lettered when they cannot succeed. A `kill -9`'d dispatcher loses nothing, and per-key
-ordering holds at 32 workers with 30% induced failures.
+**Phase 3 — DLQ, circuit breaker, endpoint verification.** Dead letters can be browsed and
+replayed (idempotently, rate-ramped). An ordered stream whose head dies pauses instead of skipping,
+and replaying the head restores the exact original order. A dead endpoint trips a Postgres-backed
+circuit breaker that parks its streams and lets exactly one probe through per cooldown. New
+endpoints receive nothing until they echo a signed challenge.
 
 | Phase | | |
 |---|---|---|
 | 0 | Foundation: skeleton, containers, CI, design system | done |
 | 1 | Data model + ingest | done |
-| 2 | Queue, bounded worker pool, delivery | **done** |
-| 3 | DLQ replay, circuit breaker, endpoint verification | next |
-| 4 | Live layer: WebSocket hub + demo scenario engine | |
+| 2 | Queue, bounded worker pool, delivery | done |
+| 3 | DLQ replay, circuit breaker, endpoint verification | **done** |
+| 4 | Live layer: WebSocket hub + demo scenario engine | next |
 | 5 | Dashboard | |
 | 6 | Benchmarks + Grafana dashboards | |
 | 7 | Ship: public demo + write-up | |
@@ -176,6 +177,9 @@ internal/
   worker/            bounded pool, slots, heartbeat, drain, executor, reaper
   deliver/           HTTP client, HMAC signing, SSRF dialer, classification
   retry/             full-jitter backoff (a pure function)
+  breaker/           circuit-breaker state machine (a pure function)
+  dlq/               dead-letter replay
+  verify/            endpoint verification handshake
   receiver/          programmable subscriber for tests and the receiver-sim
   web/               the dashboard, compiled in with embed.FS
 web/                 dashboard source (Vite + React 19 + Tailwind v4)

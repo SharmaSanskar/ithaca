@@ -128,9 +128,35 @@ its own retry budget. An open circuit *parks* every stream for that endpoint rat
 slow-draining 10,000 queued deliveries to a dead endpoint costs 10,000 useless leases competing with
 healthy traffic in the same index scan.
 
+**Ordered streams pause on death; replay restores order.** When the head of an ordered stream is
+dead-lettered, the stream stops (`state = 'paused'`) and everything behind it waits. Skipping ahead
+would hand the subscriber "shipped" before "created". Replaying the dead head re-inserts it at its
+**original `seq`**, which is still free and lower than everything queued behind it, so the stream
+resumes in exactly the original order. A replay into a stream that is not paused on it appends at
+the tail like a new event.
+
+**Replay is idempotent by construction.** Claiming a dead letter sets `replayed_at` in the same
+transaction that creates its replay, and the claim only matches rows where it is `NULL`. A
+double-clicked "Replay" blocks on the first click's row locks, re-checks, and claims nothing; no
+idempotency key is needed. Replays to one endpoint are spaced (default 50/s), so replaying a backlog
+to a just-recovered endpoint ramps instead of arriving as one burst.
+
+**The circuit breaker lives in Postgres, next to the streams it parks.** The state machine is a pure
+function (`internal/breaker`) run inside the ack transaction that observed the failure, so the
+breaker can never disagree with the delivery record. The healthy path never locks the endpoint row:
+only acks carrying a failure or a probe result do. Open circuits park their streams (out of the
+dequeue index, so a dead endpoint's backlog stops competing with healthy traffic). After a jittered
+cooldown, `SKIP LOCKED` hands exactly one stream to exactly one dispatcher as the probe, which may
+send exactly one request. On recovery, parked streams reopen staggered over a few seconds rather than
+all at once.
+
+**Endpoints must echo a signed challenge before receiving anything.** The verifier runs in the
+dispatcher (it needs the same SSRF-guarded client and signing secrets); the API never makes
+outbound calls to customer URLs.
+
 ### Measured, not assumed
 
-Four things the tests measured that changed the implementation:
+Things the tests measured that changed the implementation:
 
 - **Ack batching sets the duplicate rate.** Acking once per 64-message drain batch meant a crashed
   dispatcher threw away the acks for everything the subscriber had already accepted in that batch:
@@ -145,6 +171,12 @@ Four things the tests measured that changed the implementation:
 - **The retry schedule.** Quoting a backoff schedule by its window ceilings and then applying full
   jitter roughly halves the real duration. A 5s base that "takes ~6h" actually dead-letters after
   ~1.4h. The default is a 30s base, which simulates to ~7h.
+- **Breaker threshold is a statement about failure rate.** At 5 consecutive failures, an endpoint
+  that was merely 30% flaky tripped the breaker (0.3⁵ ≈ 1 in 400 windows, seconds at volume). At 10
+  it is 1 in 170,000, and a dead endpoint still trips within ten requests.
+- **A probe must not wait for a delivery's backoff.** A half-open probe whose stream head was still
+  backing off found nothing "due", released without probing, and left the breaker stuck until the
+  probe timed out. Probes now take the first pending message regardless of due time.
 - **Panics on errgroup goroutines.** `recover()` only catches panics on its own goroutine, so a
   `recover` around a drain loop never sees a panic in a concurrent delivery. One bad delivery would
   have crashed the whole dispatcher. The recover lives on the goroutine that runs the attempt.

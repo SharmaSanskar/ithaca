@@ -20,6 +20,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/SharmaSanskar/ithaca/internal/auth"
+	"github.com/SharmaSanskar/ithaca/internal/breaker"
 	"github.com/SharmaSanskar/ithaca/internal/deliver"
 	"github.com/SharmaSanskar/ithaca/internal/ingest"
 	"github.com/SharmaSanskar/ithaca/internal/platform/clock"
@@ -34,6 +35,8 @@ import (
 )
 
 // ── harness ──────────────────────────────────────────────────────────────────
+
+var testBreaker = breaker.Policy{Threshold: 5, BaseCooldown: 50 * time.Millisecond, MaxCooldown: 400 * time.Millisecond}
 
 type harness struct {
 	t      *testing.T
@@ -55,7 +58,11 @@ func newHarness(t *testing.T) *harness {
 	rcv := receiver.New(42, true)
 	srv := httptest.NewServer(rcv.Handler())
 	t.Cleanup(srv.Close)
-	return &harness{t: t, store: s, q: pg.New(s), rcv: rcv, srv: srv, tenant: p.TenantID, ingest: ingest.NewService(s, nil)}
+	// A breaker with test-speed cooldowns: real enough that flaky receivers
+	// trip it (so parking and probing run under every test), fast enough not
+	// to dominate test time.
+	q := pg.New(s, pg.WithBreaker(testBreaker), pg.WithUnparkSpread(20*time.Millisecond))
+	return &harness{t: t, store: s, q: q, rcv: rcv, srv: srv, tenant: p.TenantID, ingest: ingest.NewService(s, nil)}
 }
 
 // endpoint registers a sink with a known secret, so the receiver verifies
@@ -64,7 +71,8 @@ func (h *harness) endpoint(sink string, timeout time.Duration) uuid.UUID {
 	h.t.Helper()
 	secret := []byte("secret-" + sink)
 	ep, err := h.store.CreateEndpoint(context.Background(), gen.CreateEndpointParams{
-		ID: uuid.Must(uuid.NewV7()), TenantID: h.tenant, Url: h.srv.URL + "/sink/" + sink,
+		State: "enabled", // already verified: these tests are not about the handshake
+		ID:    uuid.Must(uuid.NewV7()), TenantID: h.tenant, Url: h.srv.URL + "/sink/" + sink,
 		TimeoutMs: int32(timeout.Milliseconds()), MaxConcurrency: 8, SigningKeyID: "k_" + sink, SigningSecret: secret,
 	})
 	if err != nil {
@@ -166,8 +174,15 @@ func (h *harness) startPool(o poolOpts) (stop func(grace time.Duration) error) {
 	runDone := make(chan error, 1)
 	go func() { runDone <- p.Run(ctx) }()
 	reaper := &worker.Reaper{Q: h.q, Every: 100 * time.Millisecond, Log: log, M: m}
+	bl := &worker.BreakerLoop{B: h.q, Every: 20 * time.Millisecond, Log: log, M: m}
 	reaperDone := make(chan struct{})
-	go func() { _ = reaper.Run(ctx); close(reaperDone) }()
+	go func() {
+		var wg sync.WaitGroup
+		wg.Go(func() { _ = reaper.Run(ctx) })
+		wg.Go(func() { _ = bl.Run(ctx) })
+		wg.Wait()
+		close(reaperDone)
+	}()
 
 	var once sync.Once
 	stop = func(grace time.Duration) error {
@@ -359,9 +374,9 @@ func (k *killableQueue) Renew(ctx context.Context, l *queue.Lease) error {
 	return k.Queue.Renew(ctx, l)
 }
 
-func (k *killableQueue) Ack(ctx context.Context, l *queue.Lease, rs []queue.Result) error {
+func (k *killableQueue) Ack(ctx context.Context, l *queue.Lease, rs []queue.Result) (queue.AckOutcome, error) {
 	if k.dead.Load() {
-		return errKilled
+		return queue.AckOutcome{}, errKilled
 	}
 	return k.Queue.Ack(ctx, l, rs)
 }
@@ -448,7 +463,7 @@ func TestZombieWorkerIsFencedOut(t *testing.T) {
 
 	// The zombie wakes up and tries to finish its work.
 	res := []queue.Result{{DeliveryID: msgs[0].DeliveryID, Disposition: queue.Succeeded, Attempts: 1}}
-	if err := h.q.Ack(ctx, zombie[0], res); !errors.Is(err, queue.ErrLeaseLost) {
+	if _, err := h.q.Ack(ctx, zombie[0], res); !errors.Is(err, queue.ErrLeaseLost) {
 		t.Fatalf("zombie ack: %v, want ErrLeaseLost", err)
 	}
 	if err := h.q.Release(ctx, zombie[0], 0); !errors.Is(err, queue.ErrLeaseLost) {
@@ -466,7 +481,7 @@ func TestZombieWorkerIsFencedOut(t *testing.T) {
 		t.Errorf("stream held by %q after the zombie's attempts, want fresh", holder)
 	}
 	// And the rightful holder can still ack.
-	if err := h.q.Ack(ctx, fresh[0], res); err != nil {
+	if _, err := h.q.Ack(ctx, fresh[0], res); err != nil {
 		t.Errorf("rightful ack: %v", err)
 	}
 }

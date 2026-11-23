@@ -160,6 +160,15 @@ type Delivery struct {
 	RetryCap   time.Duration
 	// MaxAttempts is the total number of attempts before dead-lettering.
 	MaxAttempts int
+
+	// Circuit breaker: open after BreakerThreshold consecutive failures,
+	// probe after BreakerCooldown, doubling to BreakerMaxCooldown.
+	BreakerThreshold   int
+	BreakerCooldown    time.Duration
+	BreakerMaxCooldown time.Duration
+
+	// ReplayRate is replayed deliveries per second per endpoint.
+	ReplayRate int
 }
 
 // Telemetry configures OTel export.
@@ -226,6 +235,12 @@ func Load(svc Service) (*Config, error) {
 			RetryBase:   l.dur("ITHACA_RETRY_BASE", 30*time.Second),
 			RetryCap:    l.dur("ITHACA_RETRY_CAP", 6*time.Hour),
 			MaxAttempts: l.int("ITHACA_RETRY_MAX_ATTEMPTS", 12),
+
+			BreakerThreshold:   l.int("ITHACA_BREAKER_THRESHOLD", 10),
+			BreakerCooldown:    l.dur("ITHACA_BREAKER_COOLDOWN", 30*time.Second),
+			BreakerMaxCooldown: l.dur("ITHACA_BREAKER_MAX_COOLDOWN", 10*time.Minute),
+
+			ReplayRate: l.int("ITHACA_REPLAY_RATE", 50),
 		},
 		ShutdownGrace: l.dur("ITHACA_SHUTDOWN_GRACE", 30*time.Second),
 	}
@@ -321,6 +336,12 @@ func (c *Config) validate() error {
 	}
 	if c.Delivery.RetryBase <= 0 || c.Delivery.RetryCap < c.Delivery.RetryBase || c.Delivery.MaxAttempts < 1 {
 		errs = append(errs, "retry policy invalid: need RETRY_BASE > 0, RETRY_CAP >= RETRY_BASE, RETRY_MAX_ATTEMPTS >= 1")
+	}
+	if c.Delivery.BreakerThreshold < 1 || c.Delivery.BreakerCooldown <= 0 || c.Delivery.BreakerMaxCooldown < c.Delivery.BreakerCooldown {
+		errs = append(errs, "breaker invalid: need BREAKER_THRESHOLD >= 1, BREAKER_COOLDOWN > 0, BREAKER_MAX_COOLDOWN >= BREAKER_COOLDOWN")
+	}
+	if c.Delivery.ReplayRate < 1 {
+		errs = append(errs, "ITHACA_REPLAY_RATE must be >= 1")
 	}
 	if c.Admin.Pprof && c.Env == "prod" {
 		// Not fatal — pprof on the admin port is not internet-reachable — but

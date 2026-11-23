@@ -10,6 +10,7 @@ import (
 
 	"github.com/SharmaSanskar/ithaca/internal/api"
 	"github.com/SharmaSanskar/ithaca/internal/auth"
+	"github.com/SharmaSanskar/ithaca/internal/breaker"
 	"github.com/SharmaSanskar/ithaca/internal/deliver"
 	"github.com/SharmaSanskar/ithaca/internal/ingest"
 	"github.com/SharmaSanskar/ithaca/internal/janitor"
@@ -20,6 +21,7 @@ import (
 	"github.com/SharmaSanskar/ithaca/internal/queue/pg"
 	"github.com/SharmaSanskar/ithaca/internal/receiver"
 	"github.com/SharmaSanskar/ithaca/internal/retry"
+	"github.com/SharmaSanskar/ithaca/internal/verify"
 	"github.com/SharmaSanskar/ithaca/internal/web"
 	"github.com/SharmaSanskar/ithaca/internal/worker"
 )
@@ -105,8 +107,13 @@ func (a *app) wireDispatcher() error {
 	d := a.cfg.Dispatch
 	slots := worker.NewSlots(d.Workers)
 	m := worker.NewMetrics(a.metrics.Registerer(), slots)
-	q := pg.New(a.store)
-	exec := worker.NewExecutor(deliver.NewClient(guard), retry.Policy{
+	q := pg.New(a.store, pg.WithBreaker(breaker.Policy{
+		Threshold:    a.cfg.Delivery.BreakerThreshold,
+		BaseCooldown: a.cfg.Delivery.BreakerCooldown,
+		MaxCooldown:  a.cfg.Delivery.BreakerMaxCooldown,
+	}))
+	client := deliver.NewClient(guard)
+	exec := worker.NewExecutor(client, retry.Policy{
 		Base:        a.cfg.Delivery.RetryBase,
 		Multiplier:  2,
 		Cap:         a.cfg.Delivery.RetryCap,
@@ -136,6 +143,15 @@ func (a *app) wireDispatcher() error {
 	a.runner.Add(shutdown.Component{Name: "queue-stats", Run: (&worker.StatsLoop{
 		Q: q, Every: 5 * time.Second, Log: a.log.With("component", "queue-stats"), M: m,
 	}).Run})
+	a.runner.Add(shutdown.Component{Name: "breaker", Run: (&worker.BreakerLoop{
+		B: q, Every: time.Second, Log: a.log.With("component", "breaker"), M: m,
+	}).Run})
+	// The verifier lives here because it needs exactly what delivery needs:
+	// the SSRF-guarded client and the signing secrets. The API never makes
+	// outbound requests to customer URLs.
+	a.runner.Add(shutdown.Component{Name: "verifier", Run: verify.New(
+		a.store, client, a.log.With("component", "verifier"), a.metrics.Registerer(),
+	).Run})
 	return nil
 }
 
@@ -154,7 +170,7 @@ func (a *app) wireAPI() error {
 		return err
 	}
 	authn := auth.NewAuthenticator(a.store, apiKeyCacheTTL)
-	cp := api.NewControlPlane(a.store)
+	cp := api.NewControlPlane(a.store, float64(a.cfg.Delivery.ReplayRate))
 
 	return a.addPublicListener("api", func(r chi.Router) {
 		r.Route("/api/v1", func(r chi.Router) {
