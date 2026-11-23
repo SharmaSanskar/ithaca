@@ -21,15 +21,17 @@ the product cannot exist without one.
 
 ## Status
 
-**Phase 1 — Data model + ingest.** Events are accepted, deduplicated by `Idempotency-Key` and fanned
-out into per-stream deliveries, all in one transaction. The delivery engine arrives in Phase 2.
+**Phase 2 — Queue, worker pool, delivery.** Events are leased by stream, delivered by a bounded
+worker pool with signed requests through an SSRF-guarded client, retried with full-jitter backoff,
+and dead-lettered when they cannot succeed. A `kill -9`'d dispatcher loses nothing, and per-key
+ordering holds at 32 workers with 30% induced failures.
 
 | Phase | | |
 |---|---|---|
 | 0 | Foundation: skeleton, containers, CI, design system | done |
-| 1 | Data model + ingest | **done** |
-| 2 | Queue, bounded worker pool, delivery | next |
-| 3 | Retries, DLQ, circuit breaker, endpoint verification | |
+| 1 | Data model + ingest | done |
+| 2 | Queue, bounded worker pool, delivery | **done** |
+| 3 | DLQ replay, circuit breaker, endpoint verification | next |
 | 4 | Live layer: WebSocket hub + demo scenario engine | |
 | 5 | Dashboard | |
 | 6 | Benchmarks + Grafana dashboards | |
@@ -170,9 +172,11 @@ internal/
   api/               control plane: endpoints, subscriptions
   auth/              API keys: prefix lookup, SHA-256, constant-time compare
   store/             pgx pool, sqlc queries (store/queries) and generated code
-  queue/             the driver boundary (Postgres)
-  worker/            bounded pool, slots, heartbeat, drain
+  queue/             the driver boundary; queue/pg is the Postgres driver
+  worker/            bounded pool, slots, heartbeat, drain, executor, reaper
   deliver/           HTTP client, HMAC signing, SSRF dialer, classification
+  retry/             full-jitter backoff (a pure function)
+  receiver/          programmable subscriber for tests and the receiver-sim
   web/               the dashboard, compiled in with embed.FS
 web/                 dashboard source (Vite + React 19 + Tailwind v4)
 migrations/          goose, forward-only

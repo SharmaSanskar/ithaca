@@ -11,6 +11,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -72,6 +73,8 @@ type Config struct {
 	Postgres  Postgres
 	Redis     Redis
 	Telemetry Telemetry
+	Dispatch  Dispatch
+	Delivery  Delivery
 
 	// ShutdownGrace is how long in-flight work gets to finish after SIGTERM.
 	// Kubernetes terminationGracePeriodSeconds MUST be larger than this
@@ -119,14 +122,47 @@ type Postgres struct {
 	StatementCacheOff bool
 }
 
-// Redis backs pub/sub wakeups, rate-limit buckets, breaker state and sessions.
-// It is deliberately never the source of truth: losing Redis must degrade
-// latency, never correctness.
+// Redis fans out live dashboard updates (Phase 4). It is off the delivery
+// path: losing it costs a stale graph, never a delivery.
 type Redis struct {
 	URL string
 }
 
-// Telemetry configures OTel export. Wired properly in Phase 2.
+// Dispatch tunes the dispatcher's worker pool. See internal/worker.
+type Dispatch struct {
+	// Workers is the number of streams leased and processed concurrently.
+	Workers int
+	// MaxStreamsBatch caps the streams leased per dequeue round trip.
+	MaxStreamsBatch int
+	// DrainBatch is how many deliveries are fetched per stream per round.
+	DrainBatch int
+	// MaxDrainRounds bounds how long one busy stream is held, so it cannot
+	// starve the others.
+	MaxDrainRounds int
+	// MinLease floors the lease. The actual lease is
+	// max(MinLease, 2*endpoint.timeout + LeasePadding).
+	MinLease     time.Duration
+	LeasePadding time.Duration
+	// Adaptive polling: snap to PollFloor after finding work, back off toward
+	// PollCeiling while idle.
+	PollFloor   time.Duration
+	PollCeiling time.Duration
+	// ReapEvery is how often expired leases are reclaimed.
+	ReapEvery time.Duration
+}
+
+// Delivery configures outbound HTTP and the retry schedule.
+type Delivery struct {
+	// AllowCIDRs are exempted from the SSRF blocklist. Empty in production.
+	// Dev allows loopback so the receiver simulator on localhost works.
+	AllowCIDRs []string
+	RetryBase  time.Duration
+	RetryCap   time.Duration
+	// MaxAttempts is the total number of attempts before dead-lettering.
+	MaxAttempts int
+}
+
+// Telemetry configures OTel export.
 type Telemetry struct {
 	Enabled      bool
 	OTLPEndpoint string
@@ -175,7 +211,35 @@ func Load(svc Service) (*Config, error) {
 			SampleRatio:  float64(l.int("ITHACA_OTEL_SAMPLE_PERCENT", 100)) / 100,
 			ServiceName:  l.str("ITHACA_OTEL_SERVICE_NAME", "ithaca-"+string(svc)),
 		},
+		Dispatch: Dispatch{
+			Workers:         l.int("ITHACA_DISPATCH_WORKERS", 64),
+			MaxStreamsBatch: l.int("ITHACA_DISPATCH_MAX_STREAMS_BATCH", 32),
+			DrainBatch:      l.int("ITHACA_DISPATCH_DRAIN_BATCH", 64),
+			MaxDrainRounds:  l.int("ITHACA_DISPATCH_MAX_DRAIN_ROUNDS", 4),
+			MinLease:        l.dur("ITHACA_DISPATCH_MIN_LEASE", 30*time.Second),
+			LeasePadding:    l.dur("ITHACA_DISPATCH_LEASE_PADDING", 10*time.Second),
+			PollFloor:       l.dur("ITHACA_DISPATCH_POLL_FLOOR", 50*time.Millisecond),
+			PollCeiling:     l.dur("ITHACA_DISPATCH_POLL_CEILING", 500*time.Millisecond),
+			ReapEvery:       l.dur("ITHACA_DISPATCH_REAP_EVERY", 5*time.Second),
+		},
+		Delivery: Delivery{
+			RetryBase:   l.dur("ITHACA_RETRY_BASE", 30*time.Second),
+			RetryCap:    l.dur("ITHACA_RETRY_CAP", 6*time.Hour),
+			MaxAttempts: l.int("ITHACA_RETRY_MAX_ATTEMPTS", 12),
+		},
 		ShutdownGrace: l.dur("ITHACA_SHUTDOWN_GRACE", 30*time.Second),
+	}
+
+	// Loopback is allowed by default in dev only, so a local receiver works.
+	// Everywhere else the SSRF blocklist is absolute unless explicitly opened.
+	defAllow := ""
+	if cfg.Env == "dev" {
+		defAllow = "127.0.0.0/8,::1/128"
+	}
+	for _, c := range strings.Split(l.str("ITHACA_DELIVERY_ALLOW_CIDRS", defAllow), ",") {
+		if c = strings.TrimSpace(c); c != "" {
+			cfg.Delivery.AllowCIDRs = append(cfg.Delivery.AllowCIDRs, c)
+		}
 	}
 
 	// Log level: accept the usual names, default by environment.
@@ -239,6 +303,24 @@ func (c *Config) validate() error {
 	}
 	if c.Telemetry.SampleRatio < 0 || c.Telemetry.SampleRatio > 1 {
 		errs = append(errs, "ITHACA_OTEL_SAMPLE_PERCENT must be between 0 and 100")
+	}
+	for _, cidr := range c.Delivery.AllowCIDRs {
+		if _, err := netip.ParsePrefix(cidr); err != nil {
+			errs = append(errs, fmt.Sprintf("ITHACA_DELIVERY_ALLOW_CIDRS: %q is not a CIDR prefix", cidr))
+		}
+	}
+	d := c.Dispatch
+	if d.Workers < 1 || d.MaxStreamsBatch < 1 || d.DrainBatch < 1 || d.MaxDrainRounds < 1 {
+		errs = append(errs, "ITHACA_DISPATCH_{WORKERS,MAX_STREAMS_BATCH,DRAIN_BATCH,MAX_DRAIN_ROUNDS} must all be >= 1")
+	}
+	if d.PollFloor <= 0 || d.PollCeiling < d.PollFloor {
+		errs = append(errs, "ITHACA_DISPATCH_POLL_FLOOR must be > 0 and <= ITHACA_DISPATCH_POLL_CEILING")
+	}
+	if d.MinLease <= 0 || d.ReapEvery <= 0 {
+		errs = append(errs, "ITHACA_DISPATCH_MIN_LEASE and ITHACA_DISPATCH_REAP_EVERY must be positive")
+	}
+	if c.Delivery.RetryBase <= 0 || c.Delivery.RetryCap < c.Delivery.RetryBase || c.Delivery.MaxAttempts < 1 {
+		errs = append(errs, "retry policy invalid: need RETRY_BASE > 0, RETRY_CAP >= RETRY_BASE, RETRY_MAX_ATTEMPTS >= 1")
 	}
 	if c.Admin.Pprof && c.Env == "prod" {
 		// Not fatal — pprof on the admin port is not internet-reachable — but

@@ -1,21 +1,27 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/SharmaSanskar/ithaca/internal/api"
 	"github.com/SharmaSanskar/ithaca/internal/auth"
+	"github.com/SharmaSanskar/ithaca/internal/deliver"
 	"github.com/SharmaSanskar/ithaca/internal/ingest"
 	"github.com/SharmaSanskar/ithaca/internal/janitor"
+	"github.com/SharmaSanskar/ithaca/internal/platform/clock"
 	"github.com/SharmaSanskar/ithaca/internal/platform/config"
 	"github.com/SharmaSanskar/ithaca/internal/platform/httpx"
 	"github.com/SharmaSanskar/ithaca/internal/platform/shutdown"
+	"github.com/SharmaSanskar/ithaca/internal/queue/pg"
+	"github.com/SharmaSanskar/ithaca/internal/receiver"
+	"github.com/SharmaSanskar/ithaca/internal/retry"
 	"github.com/SharmaSanskar/ithaca/internal/web"
+	"github.com/SharmaSanskar/ithaca/internal/worker"
 )
 
 // wire assembles the components for whichever service this process is.
@@ -25,6 +31,9 @@ import (
 // engine, schema and dashboard arrive in later phases and slot into these
 // same seams.
 func (a *app) wire() error {
+	if err := a.setupTelemetry(); err != nil {
+		return err
+	}
 	if err := a.addAdminListener(); err != nil {
 		return err
 	}
@@ -81,11 +90,61 @@ const apiKeyCacheTTL = 30 * time.Second
 // listener at all — it is a pure consumer, so there is nothing to route to it
 // and nothing for an Ingress to expose.
 func (a *app) wireDispatcher() error {
-	a.runner.Add(shutdown.Component{
-		Name: "dispatcher",
-		Run:  idleUntilDone("dispatcher pool arrives in Phase 2"),
-	})
+	if err := a.openStore(); err != nil {
+		return err
+	}
+	guard, err := deliver.NewGuard(a.cfg.Delivery.AllowCIDRs)
+	if err != nil {
+		return err
+	}
+	if len(a.cfg.Delivery.AllowCIDRs) > 0 {
+		a.log.Warn("SSRF blocklist has exemptions; never do this in production",
+			"allow_cidrs", a.cfg.Delivery.AllowCIDRs)
+	}
+
+	d := a.cfg.Dispatch
+	slots := worker.NewSlots(d.Workers)
+	m := worker.NewMetrics(a.metrics.Registerer(), slots)
+	q := pg.New(a.store)
+	exec := worker.NewExecutor(deliver.NewClient(guard), retry.Policy{
+		Base:        a.cfg.Delivery.RetryBase,
+		Multiplier:  2,
+		Cap:         a.cfg.Delivery.RetryCap,
+		MaxAttempts: a.cfg.Delivery.MaxAttempts,
+	}, m)
+
+	pool := worker.New(worker.Config{
+		WorkerID:        workerID(),
+		Workers:         d.Workers,
+		MaxStreamsBatch: d.MaxStreamsBatch,
+		DrainBatch:      d.DrainBatch,
+		MaxDrainRounds:  d.MaxDrainRounds,
+		MinLease:        d.MinLease,
+		LeasePadding:    d.LeasePadding,
+		PollFloor:       d.PollFloor,
+		PollCeiling:     d.PollCeiling,
+		DisabledRecheck: time.Minute,
+	}, q, exec, slots, a.log.With("component", "pool"), m, clock.Real{})
+
+	// Registration order matters for shutdown: components stop in REVERSE
+	// order, and only the pool has a Stop. The reaper and stats loop keep
+	// running until the pool has drained.
+	a.runner.Add(shutdown.Component{Name: "pool", Run: pool.Run, Stop: pool.Shutdown})
+	a.runner.Add(shutdown.Component{Name: "reaper", Run: (&worker.Reaper{
+		Q: q, Every: d.ReapEvery, Log: a.log.With("component", "reaper"), M: m,
+	}).Run})
+	a.runner.Add(shutdown.Component{Name: "queue-stats", Run: (&worker.StatsLoop{
+		Q: q, Every: 5 * time.Second, Log: a.log.With("component", "queue-stats"), M: m,
+	}).Run})
 	return nil
+}
+
+// workerID names this process in lease rows (locked_by) and attempt rows, so
+// "who was holding this stream?" has an answer. In Kubernetes HOSTNAME is the
+// pod name.
+func workerID() string {
+	host, _ := os.Hostname()
+	return fmt.Sprintf("%s-%d", host, os.Getpid())
 }
 
 // ── api (control plane + dashboard) ──────────────────────────────────────────
@@ -132,9 +191,9 @@ func (a *app) wireWS() error {
 
 // ── worker (periodic) ────────────────────────────────────────────────────────
 
-// The idempotency janitor now; the lease reaper and DLQ replay ramp join in
-// Phases 2-3. Low-volume, singleton-ish work that must not
-// compete with delivery for the dispatcher's worker slots.
+// The idempotency janitor (and the DLQ replay ramp in Phase 3). Low-volume
+// periodic work that must not compete with delivery for the dispatcher's
+// worker slots. The lease reaper lives in the dispatcher itself.
 func (a *app) wireWorker() error {
 	if err := a.openStore(); err != nil {
 		return err
@@ -152,9 +211,12 @@ func (a *app) wireWorker() error {
 // to provoke it. Runs in-cluster during load tests so deliveries never leave
 // the AZ (external URLs would mean paying NAT egress per delivery body).
 func (a *app) wireReceiverSim() error {
+	// No request log: this process may take millions of requests in a load
+	// test. Per-sink counters are kept instead (GET /sink/{id}/stats).
+	rcv := receiver.New(uint64(time.Now().UnixNano()), false) //nolint:gosec // seed only
 	return a.addPublicListener("receiver-sim", func(r chi.Router) {
 		r.Get("/", serviceInfo(config.ServiceReceiverSim))
-		r.Post("/sink/{id}", notImplemented("programmable sink", "Phase 2"))
+		rcv.Mount(r)
 	})
 }
 
@@ -170,22 +232,5 @@ func notImplemented(what, phase string) http.HandlerFunc {
 			"not_implemented",
 			fmt.Sprintf("%s is not built yet (%s).", what, phase),
 		))
-	}
-}
-
-// idleUntilDone keeps a listener-less service alive so its probes, metrics and
-// shutdown path are all real and testable before the real work exists.
-func idleUntilDone(note string) func(context.Context) error {
-	return func(ctx context.Context) error {
-		_ = note
-		t := time.NewTicker(time.Hour)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-t.C:
-			}
-		}
 	}
 }

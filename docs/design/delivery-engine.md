@@ -944,7 +944,9 @@ func NextBackoff(attempt int, p Policy, r *rand.Rand) time.Duration {
 
 **Full jitter over "exponential + ±20%":** AWS's *Exponential Backoff and Jitter* measured this directly — full jitter minimizes both total work and completion time under contention. It matters more here than in most systems, because when a downed endpoint comes back, *every* queued delivery for it becomes due; without jitter you deliver a synchronized thundering herd to a service that just finished recovering and knock it back over. Full jitter smears them across the whole window.
 
-**Defaults:** `Base=5s, Multiplier=2.0, Cap=6h, MaxAttempts=12`. Schedule (medians): 5s, 10s, 20s, 40s, 80s, 2.7m, 5.3m, 10.7m, 21m, 43m, 1.4h, 2.8h → ~6h to exhaustion at the median, ~12h worst case. Long enough to survive a business-hours outage, short enough that the DLQ isn't a week stale.
+**Defaults:** `Base=30s, Multiplier=2.0, Cap=6h, MaxAttempts=12`. Window *ceilings*: 30s, 1m, 2m, 4m, 8m, 16m, 32m, 64m, 2.1h, 4.3h, 6h. Under full jitter the *expected* wait is about half of each ceiling, so expected time to exhaustion is **~7h** (pinned by a test). Long enough to survive a business-hours outage, short enough that the DLQ isn't a week stale.
+
+> **Correction from implementation:** an earlier draft used `Base=5s` and quoted "~6h to exhaustion" by summing the ceilings. Full jitter roughly halves that, so it would actually have dead-lettered after ~1.4h. The test that caught it simulates the schedule instead of trusting the arithmetic.
 
 **Per-endpoint override** via `endpoints.retry_policy jsonb`, validated on write:
 ```json

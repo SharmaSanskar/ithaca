@@ -10,6 +10,7 @@ import (
 
 	"github.com/SharmaSanskar/ithaca/internal/auth"
 	"github.com/SharmaSanskar/ithaca/internal/platform/httpx"
+	"github.com/SharmaSanskar/ithaca/internal/platform/otelx"
 )
 
 // Handler exposes the ingest service over HTTP.
@@ -63,7 +64,10 @@ func (h *Handler) postEvent(w http.ResponseWriter, r *http.Request) {
 		Path:           r.URL.Path,
 		Body:           body,
 		IdempotencyKey: key,
-		Traceparent:    r.Header.Get("traceparent"),
+		// The ingest request's OWN span (created by the otelhttp middleware),
+		// so the delivery's span link points at this request. Falls back to
+		// the caller's header when tracing is off.
+		Traceparent: traceparent(r),
 	})
 	if err != nil {
 		var fe *FieldError
@@ -88,6 +92,13 @@ func (h *Handler) postEvent(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(res.Status)
 	_, _ = w.Write(append(res.Body, '\n'))
+}
+
+func traceparent(r *http.Request) string {
+	if tp := otelx.Traceparent(r.Context()); tp != "" {
+		return tp
+	}
+	return r.Header.Get("traceparent")
 }
 
 func validIdempotencyKey(k string) bool {

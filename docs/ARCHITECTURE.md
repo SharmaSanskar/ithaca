@@ -122,11 +122,32 @@ that many streams. The inverse — dequeue, then find somewhere to put it — co
 problem into a memory problem and takes out leases that expire unserviced, producing a livelock in
 which the system is fully occupied reaping its own abandoned work.
 
-**Rate limits and open circuits are scheduling decisions.** A throttled endpoint re-dates its stream
-and releases the worker slot immediately: no HTTP request, no consumed retry attempt, no wasted
-lease. An open circuit *parks* every stream for that endpoint rather than slow-draining it, because
+**Rate limits and open circuits are scheduling decisions.** A `429` re-dates the delivery
+(honouring `Retry-After`) without consuming a retry attempt, so a throttling subscriber cannot burn
+its own retry budget. An open circuit *parks* every stream for that endpoint rather than slow-draining it, because
 slow-draining 10,000 queued deliveries to a dead endpoint costs 10,000 useless leases competing with
 healthy traffic in the same index scan.
+
+### Measured, not assumed
+
+Four things the tests measured that changed the implementation:
+
+- **Ack batching sets the duplicate rate.** Acking once per 64-message drain batch meant a crashed
+  dispatcher threw away the acks for everything the subscriber had already accepted in that batch:
+  **17% duplicates** in `TestKilledDispatcherLosesNothing`. Fetching 64 but acking in chunks of the
+  lane's concurrency (8) cut that to **~5%**, bounded by one chunk per lease held, at the cost of
+  ~25% peak throughput (14.7k → 10.9k deliveries/s under the race detector). For a webhook system
+  that is the right trade: duplicates cost every subscriber, raw throughput is rarely the limit.
+- **Crash recovery time equals the lease TTL.** A `kill -9`'d dispatcher's streams sit leased until
+  their lease expires (30s minimum) and the reaper reclaims them. Shorter leases recover faster but
+  cost more heartbeat writes; the reaper runs inside every dispatcher, so there is no separate
+  process to forget to deploy.
+- **The retry schedule.** Quoting a backoff schedule by its window ceilings and then applying full
+  jitter roughly halves the real duration. A 5s base that "takes ~6h" actually dead-letters after
+  ~1.4h. The default is a 30s base, which simulates to ~7h.
+- **Panics on errgroup goroutines.** `recover()` only catches panics on its own goroutine, so a
+  `recover` around a drain loop never sees a panic in a concurrent delivery. One bad delivery would
+  have crashed the whole dispatcher. The recover lives on the goroutine that runs the attempt.
 
 ## Guarantees
 

@@ -10,12 +10,14 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/SharmaSanskar/ithaca/internal/platform/config"
 	"github.com/SharmaSanskar/ithaca/internal/platform/health"
 	"github.com/SharmaSanskar/ithaca/internal/platform/httpx"
 	"github.com/SharmaSanskar/ithaca/internal/platform/logging"
 	"github.com/SharmaSanskar/ithaca/internal/platform/metrics"
+	"github.com/SharmaSanskar/ithaca/internal/platform/otelx"
 	"github.com/SharmaSanskar/ithaca/internal/platform/shutdown"
 	"github.com/SharmaSanskar/ithaca/internal/platform/version"
 	"github.com/SharmaSanskar/ithaca/internal/store"
@@ -32,6 +34,9 @@ type app struct {
 
 	// store is opened by the services that need Postgres (see openStore).
 	store *store.Store
+
+	// otelShutdown flushes buffered spans on exit.
+	otelShutdown func(context.Context) error
 }
 
 func newApp(cfg *config.Config) *app {
@@ -64,8 +69,12 @@ func newApp(cfg *config.Config) *app {
 
 	// DrainDelay only matters behind a load balancer. In dev it is pure
 	// waiting, so Ctrl-C stays instant.
+	//
+	// It is also pointless for a service with no inbound traffic (dispatcher,
+	// worker): no load balancer is routing to it, and the delay would only eat
+	// into the time the worker pool has to drain.
 	drainDelay := 5 * time.Second
-	if cfg.Env == "dev" {
+	if cfg.Env == "dev" || cfg.HTTP.Addr == "" {
 		drainDelay = 0
 	}
 
@@ -88,6 +97,17 @@ func newApp(cfg *config.Config) *app {
 	})
 
 	return a
+}
+
+// setupTelemetry installs the OpenTelemetry tracer provider (a no-op when
+// ITHACA_OTEL_ENABLED is false).
+func (a *app) setupTelemetry() error {
+	shutdown, err := otelx.Setup(context.Background(), a.cfg.Telemetry, version.Version)
+	if err != nil {
+		return err
+	}
+	a.otelShutdown = shutdown
+	return nil
 }
 
 // openStore creates the Postgres pool and makes it a readiness dependency.
@@ -160,10 +180,19 @@ func (a *app) addPublicListener(name string, mount func(chi.Router)) error {
 	// ordering reason above.
 	httpx.PublicHealth(r, a.health)
 
+	// Outermost: a server span per request, continuing any incoming W3C
+	// traceparent. The ingest handler stores this span's context on the
+	// event, which is how a delivery hours later links back to it.
+	traced := otelhttp.NewHandler(r, name,
+		otelhttp.WithSpanNameFormatter(func(_ string, req *http.Request) string {
+			return req.Method + " " + name
+		}),
+	)
+
 	srv, err := httpx.NewServer(httpx.ServerConfig{
 		Name:     name,
 		Addr:     a.cfg.HTTP.Addr,
-		Handler:  r,
+		Handler:  traced,
 		Log:      a.log,
 		Timeouts: a.cfg.HTTP,
 	})
@@ -191,6 +220,15 @@ func (a *app) run(ctx context.Context) error {
 	// in-flight requests still need their connections while draining.
 	if a.store != nil {
 		a.store.Close()
+	}
+	if a.otelShutdown != nil {
+		// ctx is already canceled by now; keep its values, drop the
+		// cancellation, and bound the flush.
+		flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		if serr := a.otelShutdown(flushCtx); serr != nil {
+			a.log.Warn("trace exporter shutdown failed", "error", serr)
+		}
+		cancel()
 	}
 	if err != nil {
 		a.log.Error("stopped with error", "error", err)
