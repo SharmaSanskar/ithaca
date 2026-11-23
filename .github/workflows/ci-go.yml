@@ -52,9 +52,13 @@ jobs:
             exit 1
           fi
 
-      - uses: golangci/golangci-lint-action@v6
+      # v6 of this action only installs golangci-lint v1, which cannot read
+      # the v2 config and is built with a Go older than this module targets.
+      # The linter version is pinned (not "latest") to match local installs,
+      # so a new linter release can never turn main red overnight.
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: latest
+          version: v2.12.2
           args: --timeout=5m
 
   build:

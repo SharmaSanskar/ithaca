@@ -3,10 +3,11 @@
 // Package testdb gives every integration test its own freshly-migrated
 // Postgres database in ~20ms.
 //
-// The template-database trick: migrations run ONCE per test binary into
-// `ithaca_tmpl`. Each test then does
+// The template-database trick: migrations run ONCE into a template database
+// named after a hash of the migration files (`ithaca_tmpl_<hash>`). Each test
+// then does
 //
-//	CREATE DATABASE t_<random> TEMPLATE ithaca_tmpl
+//	CREATE DATABASE t_<random> TEMPLATE ithaca_tmpl_<hash>
 //
 // which is a file-level copy, not a replay of every migration. Tests get
 // complete isolation (no shared rows, no ordering dependence, safe under
@@ -15,6 +16,12 @@
 // Real Postgres, not sqlmock: every interesting behavior in this system —
 // SKIP LOCKED, ON CONFLICT row locks, unique-index waits — IS Postgres
 // behavior, and a mock would only test our assumptions about it.
+//
+// Many test binaries can share one server: `go test ./...` runs each
+// package's binary in parallel, and in CI they all point at the same service
+// container. So the template is built under a cross-process advisory lock,
+// into a temporary name that is renamed only once fully migrated, and reused
+// by every binary (and every later run) whose migrations hash the same.
 //
 // Server selection:
 //   - ITHACA_TEST_DATABASE_URL set → use that server (CI service container,
@@ -26,8 +33,11 @@ package testdb
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"sync"
@@ -35,23 +45,27 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 
 	"github.com/SharmaSanskar/ithaca/internal/store"
+	"github.com/SharmaSanskar/ithaca/migrations"
 )
 
-const templateDB = "ithaca_tmpl"
+// templateLockID is an arbitrary constant for pg_advisory_lock. Every test
+// binary on the server agrees on it, which is what serializes template builds.
+const templateLockID = 0x17ac_a7e5
 
 var (
-	once     sync.Once
-	adminURL string // connection string to the server's maintenance database
-	initErr  error
+	once       sync.Once
+	adminURL   string // connection string to the server's maintenance database
+	templateDB string // ithaca_tmpl_<migrations hash>
+	initErr    error
 
-	// CREATE DATABASE ... TEMPLATE fails if another session is connected to
-	// the template, and concurrent clones contend on it. Serializing clones
-	// costs ~20ms per test and removes a flaky failure mode.
+	// Serializes clones within one binary. Across binaries, cloneTemplate
+	// retries instead, because a mutex cannot span processes.
 	cloneMu sync.Mutex
 )
 
@@ -95,7 +109,7 @@ func NewURL(t testing.TB) string {
 	defer admin.Close(ctx)
 
 	cloneMu.Lock()
-	_, err = admin.Exec(ctx, fmt.Sprintf("CREATE DATABASE %s TEMPLATE %s", name, templateDB))
+	err = cloneTemplate(ctx, admin, name)
 	cloneMu.Unlock()
 	if err != nil {
 		t.Fatalf("testdb: clone template: %v", err)
@@ -146,23 +160,113 @@ func setup() error {
 		}
 	}
 
+	// Assign, don't declare: templateDB is the package-level name every clone
+	// uses.
+	var err error
+	if templateDB, err = templateName(); err != nil {
+		return err
+	}
+	return ensureTemplate(ctx, templateDB)
+}
+
+// templateName hashes every migration file's name and contents, so editing a
+// migration produces a new template instead of silently reusing a stale one.
+func templateName() (string, error) {
+	h := sha256.New()
+	err := fs.WalkDir(migrations.FS, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		b, err := migrations.FS.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(h, "%s\x00%d\x00", path, len(b))
+		h.Write(b)
+		return nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("hash migrations: %w", err)
+	}
+	return "ithaca_tmpl_" + hex.EncodeToString(h.Sum(nil))[:12], nil
+}
+
+// ensureTemplate builds the template exactly once per server, however many
+// test binaries race to do it.
+func ensureTemplate(ctx context.Context, name string) error {
 	admin, err := pgx.Connect(ctx, adminURL)
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
 	defer admin.Close(ctx)
 
-	// Rebuild the template on every run so it always reflects the current
-	// migrations, even against a long-lived local server.
-	if _, err := admin.Exec(ctx, "DROP DATABASE IF EXISTS "+templateDB+" WITH (FORCE)"); err != nil {
+	// A session-level advisory lock: the first binary builds, the others
+	// block here and then find the template already present.
+	if _, err = admin.Exec(ctx, "SELECT pg_advisory_lock($1)", templateLockID); err != nil {
+		return fmt.Errorf("advisory lock: %w", err)
+	}
+	defer func() { _, _ = admin.Exec(context.WithoutCancel(ctx), "SELECT pg_advisory_unlock($1)", templateLockID) }()
+
+	var exists bool
+	if qerr := admin.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)", name).Scan(&exists); qerr != nil {
+		return qerr
+	}
+	if exists {
+		return nil
+	}
+
+	// Build under a temporary name and rename at the end. A run that dies
+	// mid-migration leaves only a *_building database behind, never a
+	// half-migrated template that later runs would clone.
+	building := name + "_building"
+	if _, err = admin.Exec(ctx, "DROP DATABASE IF EXISTS "+building+" WITH (FORCE)"); err != nil {
 		return err
 	}
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+templateDB); err != nil {
+	if _, err = admin.Exec(ctx, "CREATE DATABASE "+building); err != nil {
 		return err
 	}
 	// Migrate closes its connection before returning, which matters: a
-	// template with a live session cannot be cloned.
-	return store.Migrate(ctx, withDatabase(adminURL, templateDB), nil)
+	// database with a live session can be neither renamed nor cloned.
+	if err = store.Migrate(ctx, withDatabase(adminURL, building), nil); err != nil {
+		_, _ = admin.Exec(ctx, "DROP DATABASE IF EXISTS "+building+" WITH (FORCE)")
+		return err
+	}
+	if _, err = admin.Exec(ctx, "ALTER DATABASE "+building+" RENAME TO "+name); err != nil {
+		return err
+	}
+
+	// Templates from older migration sets are dead weight on a long-lived
+	// local server; drop them while we hold the lock.
+	rows, err := admin.Query(ctx,
+		"SELECT datname FROM pg_database WHERE datname LIKE 'ithaca\\_tmpl\\_%' AND datname <> $1", name)
+	if err != nil {
+		return err
+	}
+	stale, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return err
+	}
+	for _, db := range stale {
+		_, _ = admin.Exec(ctx, fmt.Sprintf("DROP DATABASE IF EXISTS %q WITH (FORCE)", db))
+	}
+	return nil
+}
+
+// cloneTemplate creates a test database from the template. Postgres refuses
+// to copy a database that another session is touching (SQLSTATE 55006), which
+// can happen briefly when several test binaries clone at once; that is
+// transient, so retry it.
+func cloneTemplate(ctx context.Context, admin *pgx.Conn, name string) error {
+	var err error
+	for attempt := range 20 {
+		_, err = admin.Exec(ctx, fmt.Sprintf("CREATE DATABASE %s TEMPLATE %s", name, templateDB))
+		var pgErr *pgconn.PgError
+		if err == nil || !errors.As(err, &pgErr) || pgErr.Code != "55006" {
+			return err
+		}
+		time.Sleep(time.Duration(10*(attempt+1)) * time.Millisecond)
+	}
+	return err
 }
 
 func withDatabase(raw, db string) string {
