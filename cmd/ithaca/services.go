@@ -8,6 +8,10 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/SharmaSanskar/ithaca/internal/api"
+	"github.com/SharmaSanskar/ithaca/internal/auth"
+	"github.com/SharmaSanskar/ithaca/internal/ingest"
+	"github.com/SharmaSanskar/ithaca/internal/janitor"
 	"github.com/SharmaSanskar/ithaca/internal/platform/config"
 	"github.com/SharmaSanskar/ithaca/internal/platform/httpx"
 	"github.com/SharmaSanskar/ithaca/internal/platform/shutdown"
@@ -49,16 +53,27 @@ func (a *app) wire() error {
 // fast; it makes no outbound calls, which is what keeps ingest availability
 // independent of every subscriber's health.
 func (a *app) wireIngest() error {
+	if err := a.openStore(); err != nil {
+		return err
+	}
+	svc := ingest.NewService(a.store, ingest.NewMetrics(a.metrics.Registerer()))
+	authn := auth.NewAuthenticator(a.store, apiKeyCacheTTL)
+
 	return a.addPublicListener("ingest", func(r chi.Router) {
 		r.Get("/", serviceInfo(config.ServiceIngest))
 		r.Route("/v1", func(r chi.Router) {
 			// 1 MiB matches the documented maximum event payload. Scoped to
 			// /v1 so it never applies to the health endpoint.
 			r.Use(httpx.MaxBodyBytes(1 << 20))
-			r.Post("/events", notImplemented("event ingestion", "Phase 1"))
+			r.Use(authn.Middleware)
+			ingest.NewHandler(svc).Routes(r)
 		})
 	})
 }
+
+// apiKeyCacheTTL bounds how long a revoked key keeps working. 30s is the
+// documented trade: auth becomes a map lookup on the hot path.
+const apiKeyCacheTTL = 30 * time.Second
 
 // ── dispatcher ───────────────────────────────────────────────────────────────
 
@@ -76,12 +91,24 @@ func (a *app) wireDispatcher() error {
 // ── api (control plane + dashboard) ──────────────────────────────────────────
 
 func (a *app) wireAPI() error {
+	if err := a.openStore(); err != nil {
+		return err
+	}
+	authn := auth.NewAuthenticator(a.store, apiKeyCacheTTL)
+	cp := api.NewControlPlane(a.store)
+
 	return a.addPublicListener("api", func(r chi.Router) {
 		r.Route("/api/v1", func(r chi.Router) {
 			r.Use(httpx.NoStore)
 			r.Use(httpx.MaxBodyBytes(1 << 20))
 			r.Get("/", serviceInfo(config.ServiceAPI))
-			r.Get("/me", notImplemented("session identity", "Phase 4"))
+
+			// Tenant-scoped management API, authenticated by API key. The
+			// dashboard's public read-only API arrives in Phase 4.
+			r.Group(func(r chi.Router) {
+				r.Use(authn.Middleware)
+				cp.Routes(r)
+			})
 		})
 
 		// The SPA is mounted last and catches everything else, so client-side
@@ -105,14 +132,15 @@ func (a *app) wireWS() error {
 
 // ── worker (periodic) ────────────────────────────────────────────────────────
 
-// Fanout expansion, the lease reaper, partition management, the idempotency
-// janitor and the DLQ replay ramp. Low-volume, singleton-ish work that must not
+// The idempotency janitor now; the lease reaper and DLQ replay ramp join in
+// Phases 2-3. Low-volume, singleton-ish work that must not
 // compete with delivery for the dispatcher's worker slots.
 func (a *app) wireWorker() error {
-	a.runner.Add(shutdown.Component{
-		Name: "worker",
-		Run:  idleUntilDone("periodic jobs arrive in Phase 1"),
-	})
+	if err := a.openStore(); err != nil {
+		return err
+	}
+	j := janitor.New(a.store, a.log.With("component", "janitor"), a.metrics.Registerer())
+	a.runner.Add(shutdown.Component{Name: "janitor", Run: j.Run})
 	return nil
 }
 

@@ -28,6 +28,10 @@ const (
 	ServiceReceiverSim Service = "receiver-sim"
 )
 
+// ServiceCLI is the identity used by one-shot commands (migrate, tenant). It is
+// not a long-running service and is deliberately absent from Services.
+const ServiceCLI Service = "cli"
+
 // Services is every valid subcommand, in the order they appear in help output.
 var Services = []Service{
 	ServiceIngest, ServiceDispatcher, ServiceAPI, ServiceWS, ServiceWorker, ServiceReceiverSim,

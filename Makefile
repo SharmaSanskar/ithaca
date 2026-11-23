@@ -21,6 +21,10 @@ LDFLAGS    := -X $(PKG)/internal/platform/version.Version=$(VERSION) \
 COMPOSE := docker compose -f deploy/compose/docker-compose.deps.yml
 BIN     := bin/ithaca
 
+# sqlc runs via `go run` at a pinned version, so there is nothing to install
+# and every machine (and CI) generates byte-identical code.
+SQLC := go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1
+
 # Local connection strings. Overridable, but these match compose exactly so
 # `make up && make dev` works with no further setup.
 export ITHACA_DATABASE_URL ?= postgres://ithaca:ithaca@localhost:5432/ithaca?sslmode=disable
@@ -72,6 +76,18 @@ prom-reload: ## Reload prometheus.yml without restarting Prometheus
 .PHONY: psql
 psql: ## Open a psql shell
 	$(COMPOSE) exec postgres psql -U ithaca -d ithaca
+
+.PHONY: migrate
+migrate: ## Apply database migrations
+	go run ./cmd/ithaca migrate up
+
+.PHONY: migrate-status
+migrate-status: ## List migrations and whether each is applied
+	go run ./cmd/ithaca migrate status
+
+.PHONY: tenant
+tenant: ## Create a tenant and print its API key (make tenant NAME=acme)
+	go run ./cmd/ithaca tenant create $(or $(NAME),dev)
 
 .PHONY: redis-cli
 redis-cli: ## Open a redis shell
@@ -171,6 +187,14 @@ test: ## Run unit tests with the race detector
 .PHONY: test-integration
 test-integration: ## Run integration tests (needs Docker; testcontainers)
 	go test -race -count=1 -tags=integration -timeout=10m ./...
+
+.PHONY: generate
+generate: ## Regenerate sqlc code from migrations + queries
+	$(SQLC) generate
+
+.PHONY: generate-check
+generate-check: ## Fail if generated code is stale
+	$(SQLC) diff
 
 .PHONY: cover
 cover: ## Run tests and open the coverage report

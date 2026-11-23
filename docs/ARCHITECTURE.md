@@ -37,7 +37,7 @@ That translation is why the queue is not an implementation detail. It is the pro
                        └───────┘   └──────┘   └────────────┘
 
                        ┌──────────────┐
-                       │    worker    │  fanout · reaper · partitions · replay
+                       │    worker    │  janitor · lease reaper · DLQ replay
                        └──────────────┘
 ```
 
@@ -68,19 +68,41 @@ reason SQS is a transport in this design rather than the queue itself.
 
 Three principles govern the schema:
 
-1. **Nothing is deleted row by row.** Terminal deliveries are *moved* out of the hot table in the
-   same statement that terminates them, so the queue table stays proportional to backlog rather than
-   to lifetime volume. `events`, `deliveries_history`, `delivery_attempts` and `idempotency_keys`
-   are range-partitioned by time; retention is `DROP TABLE`, an O(1) metadata operation instead of a
-   `DELETE` that generates gigabytes of WAL and dead tuples.
+1. **The queue table holds only pending work.** Terminal deliveries are *moved* out of
+   `deliveries` into `deliveries_history` in the same statement that terminates them, so the hot
+   table stays proportional to backlog rather than to lifetime volume, and VACUUM never re-scans
+   finished history.
 2. **The dequeue index is partial.** It covers only runnable streams — hundreds of rows even when
    the system holds millions of pending deliveries — so it stays resident in `shared_buffers`.
 3. **Primary keys are UUIDv7.** Time-ordered, so B-tree inserts land at the right edge instead of
    scattering random I/O across the index the way v4 does.
 
-**Redis is never the source of truth.** It carries queue wakeup hints, rate-limit buckets, circuit
-breaker state and dashboard sessions. Losing it must cost latency, never correctness — a wakeup hint
-that never arrives just means the poller finds the work 250ms later.
+**Ingest is one transaction.** Idempotency claim, event insert and fanout (one delivery per matching
+subscription) commit together or not at all. That transaction is the no-loss boundary: a `202` means
+every delivery row exists. A delivery's `seq` comes from its stream row's `next_seq`, incremented
+under the row lock that `INSERT … ON CONFLICT DO UPDATE` holds until commit, so `seq` order equals
+commit order and has no gaps. A `BIGSERIAL` would hand out numbers outside transaction order.
+
+**Idempotency without an `in_flight` state.** The key is claimed first, inside the ingest
+transaction. A concurrent duplicate blocks on the primary-key index until the winner commits, then
+reads the completed row and replays it byte-for-byte (`Idempotent-Replay: true`). The same key with
+a different body gets `422`. Since nothing half-finished is ever committed, a crash leaves nothing
+to recover.
+
+**What is deliberately not here yet: time partitioning.** At this project's scale, `events`,
+`deliveries_history`, `delivery_attempts` and `idempotency_keys` are plain tables, and retention is a
+batched `DELETE` (the worker's janitor). The scale-up path is range partitioning by time, with
+retention as `DROP TABLE`, an O(1) metadata operation. Switch when WAL volume from retention deletes
+or vacuum churn on these tables shows up on a graph. The cost is known up front: the partition key
+must join every unique constraint, so idempotency uniqueness becomes per-partition and lookups by
+bare id fan out across partitions. `deliveries` must **never** be partitioned by `state`: an UPDATE
+that moves a row across partitions makes a concurrent `SELECT … FOR UPDATE` fail with "tuple to be
+locked was already moved to another partition".
+
+**Redis is off the delivery path entirely.** Circuit-breaker state lives in Postgres next to the
+streams it parks, and the dispatcher finds work by adaptive polling of the partial dequeue index.
+That leaves one fewer moving part to fail, deploy and explain. Redis is used only to fan out live
+dashboard updates, where losing it costs a stale graph, never a delivery.
 
 ## The delivery engine
 
@@ -156,8 +178,10 @@ fine while the oldest item quietly ages.
 
 ## Deployment
 
-Local development runs the dependencies in compose and the services on the host. Kubernetes runs on
-k3d locally and EKS during the demo week, from the same Kustomize base.
+Local development runs the dependencies in compose and the services on the host. Schema changes are
+an explicit `ithaca migrate` step (a Job in Kubernetes), never run implicitly at boot, so six
+replicas never race a migration on a rolling deploy. The public demo runs the compose stack on a
+single VM. Kubernetes runs on k3d locally from a Kustomize base that is cloud-agnostic.
 
 Two lifecycle details that are easy to get wrong and expensive to get wrong:
 

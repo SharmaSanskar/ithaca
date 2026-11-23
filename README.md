@@ -5,45 +5,60 @@
 **A webhook and event delivery platform.**
 Ingest events, deliver them reliably, and watch the whole pipeline move in real time.
 
-`Go 1.25` · `Postgres 17` · `Redis` · `Kubernetes` · `Terraform` · `React 19`
+`Go 1.26` · `Postgres 17` · `Kubernetes` · `KEDA` · `Prometheus` · `OpenTelemetry` · `React 19`
 
 </div>
 
 ---
 
 Customers register HTTPS endpoints. Ithaca accepts their events, durably queues them, and delivers
-them with exponential backoff, optional per-key ordering, idempotency, per-endpoint rate limiting,
-circuit breaking, dead-lettering and replay — behind a dashboard where an event is visible moving
-from ingest through the queue to the subscriber, or down into the dead-letter queue.
+them with exponential backoff, optional per-key ordering, idempotency, `Retry-After`-aware
+throttling, circuit breaking, dead-lettering and replay — behind a dashboard where an event is
+visible moving from ingest through the queue to the subscriber, or down into the dead-letter queue.
 
 There is no CRUD filler in this project. Every component is a distributed-systems concern, because
 the product cannot exist without one.
 
 ## Status
 
-**Phase 0 — Foundation.** The service skeleton, container build, dependency stack, CI and design
-system are in place. The delivery engine arrives in Phase 2.
+**Phase 1 — Data model + ingest.** Events are accepted, deduplicated by `Idempotency-Key` and fanned
+out into per-stream deliveries, all in one transaction. The delivery engine arrives in Phase 2.
 
 | Phase | | |
 |---|---|---|
-| 0 | Foundation: skeleton, containers, CI, design system | **done** |
-| 1 | Data model + ingest | next |
-| 2 | Queue, bounded worker pool, delivery | |
-| 3 | Retries, DLQ, breaker, rate limits, endpoint verification | |
-| 4 | Control plane + WebSocket hub | |
+| 0 | Foundation: skeleton, containers, CI, design system | done |
+| 1 | Data model + ingest | **done** |
+| 2 | Queue, bounded worker pool, delivery | next |
+| 3 | Retries, DLQ, circuit breaker, endpoint verification | |
+| 4 | Live layer: WebSocket hub + demo scenario engine | |
 | 5 | Dashboard | |
-| 6 | Demo console + benchmarks | |
-| 7–8 | Kubernetes + KEDA autoscaling | |
-| 9 | Terraform, SQS driver, AWS demo week | |
-| 10 | Permanent deploy + write-up | |
+| 6 | Benchmarks + Grafana dashboards | |
+| 7 | Ship: public demo + write-up | |
+| 8 | Kubernetes (k3d + Kustomize) | |
+| 9 | KEDA autoscaling on queue depth | |
 
 ## Quick start
 
 ```bash
-make up      # containers: postgres, redis, prometheus, grafana, jaeger
-make dev     # all six services + the dashboard, in the background
-make ps      # what is running, and where
+make up                  # containers: postgres, redis, prometheus, grafana, jaeger
+make migrate             # apply the schema
+make tenant NAME=acme    # create a tenant; prints its API key (shown once)
+make dev                 # all six services + the dashboard, in the background
+make ps                  # what is running, and where
 ```
+
+Send an event:
+
+```bash
+curl -i localhost:8081/v1/events \
+  -H "Authorization: Bearer $ITHACA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: order-42-created" \
+  -d '{"type":"order.created","ordering_key":"order_42","payload":{"total":99.5}}'
+```
+
+Endpoints and subscriptions are managed at `localhost:8080/api/v1/{endpoints,subscriptions}` with
+the same key.
 
 | | |
 |---|---|
@@ -106,7 +121,7 @@ One Go module, one container image, a subcommand per service:
 | `dispatcher` | Lease streams, deliver, retry, break circuits, ack. | **queue depth (KEDA)** |
 | `api` | Control plane, and serves the embedded dashboard. | CPU |
 | `ws` | WebSocket hub for the live feed. Stateful, so it deploys separately. | connections |
-| `worker` | Fanout expansion, lease reaper, partition management, DLQ replay. | fixed |
+| `worker` | Idempotency-key janitor, lease reaper, DLQ replay. | fixed |
 
 ### The four decisions that matter
 
@@ -120,9 +135,9 @@ over a synthetic lane key, so there is one dequeue path and one ack path, not tw
 and then leases exactly that many streams. Dequeuing first and looking for somewhere to put the work
 converts a queue-depth problem into a memory problem, and takes out leases that expire unserviced.
 
-**Nothing is deleted row by row.** Terminal deliveries are moved out of the hot table in the same
-statement that terminates them, so the queue stays proportional to backlog rather than to lifetime
-volume. History, events and attempts are range-partitioned by time; retention is `DROP TABLE`.
+**The queue table holds only pending work.** Terminal deliveries are moved out of the hot table in
+the same statement that terminates them, so the queue stays proportional to backlog rather than to
+lifetime volume, and a healthy system's queue fits entirely in memory.
 
 **Rate limits and open circuits are scheduling decisions, not failures.** A throttled endpoint
 re-dates its stream and frees the worker slot immediately — no HTTP request, no consumed retry
@@ -151,7 +166,11 @@ These are enforced as tests, not prose.
 cmd/ithaca/          one entrypoint, a subcommand per service
 internal/
   platform/          config, logging, health, shutdown, metrics, http
-  queue/             the driver boundary: Postgres and SQS FIFO
+  ingest/            POST /v1/events: idempotency, fanout, per-stream seq
+  api/               control plane: endpoints, subscriptions
+  auth/              API keys: prefix lookup, SHA-256, constant-time compare
+  store/             pgx pool, sqlc queries (store/queries) and generated code
+  queue/             the driver boundary (Postgres)
   worker/            bounded pool, slots, heartbeat, drain
   deliver/           HTTP client, HMAC signing, SSRF dialer, classification
   web/               the dashboard, compiled in with embed.FS
@@ -159,7 +178,6 @@ web/                 dashboard source (Vite + React 19 + Tailwind v4)
 migrations/          goose, forward-only
 deploy/compose/      local dependency stack
 deploy/k8s/          Kustomize bases and overlays
-infra/terraform/     AWS: VPC, EKS, RDS, ElastiCache, SQS
 bench/               k6 scripts and the benchmark report
 docs/                architecture, design docs, ADRs, runbook
 ```
@@ -169,7 +187,8 @@ docs/                architecture, design docs, ADRs, runbook
 ```bash
 make check              # fmt, vet, lint, test — the same gates CI runs
 make test               # unit tests with the race detector
-make test-integration   # testcontainers against real Postgres
+make test-integration   # testcontainers against real Postgres (needs Docker)
+make generate           # regenerate sqlc code after editing a query or migration
 make build-full         # binary with the dashboard embedded
 make docker             # container image
 ```

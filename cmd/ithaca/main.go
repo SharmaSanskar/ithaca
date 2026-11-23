@@ -6,8 +6,10 @@
 //	ithaca dispatcher    lease streams and deliver (the worker pool)
 //	ithaca api           control plane + embedded dashboard
 //	ithaca ws            WebSocket hub for the live feed
-//	ithaca worker        periodic work: fanout, reaper, partitions, replay
+//	ithaca worker        periodic work: janitor, lease reaper, DLQ replay
 //	ithaca receiver-sim  programmable subscriber, for demos and load tests
+//
+// plus one-shot commands: `ithaca migrate`, `ithaca tenant create <name>`.
 //
 // Shipping one image instead of five halves the CI matrix and makes it
 // impossible to deploy a dispatcher built from a different commit than the
@@ -48,6 +50,10 @@ func run(args []string) error {
 	case "-v", "--version", "version":
 		fmt.Println(version.String())
 		return nil
+	case "migrate":
+		return runMigrate(args[2:])
+	case "tenant":
+		return runTenant(args[2:])
 	default:
 		svc, ok := config.ParseService(cmd)
 		if !ok {
@@ -88,8 +94,10 @@ services:
   %s
 
 other:
-  version    print build information
-  help       print this message
+  migrate [up|status]    apply or list database migrations
+  tenant create <name>   create a tenant and print its API key
+  version                print build information
+  help                   print this message
 
 Configuration comes from the environment; see .env.example.
 `, version.String(), strings.Join(names, "\n  "))

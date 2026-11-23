@@ -16,7 +16,7 @@ permissions:
   contents: read
 
 env:
-  GO_VERSION: "1.25"
+  GO_VERSION: "1.26"
 
 jobs:
   # Split from `test` on purpose: lint gives feedback in ~40s while the test
@@ -131,3 +131,51 @@ jobs:
           name: coverage
           path: coverage.out
           retention-days: 7
+
+  # Real Postgres, real SKIP LOCKED, real ON CONFLICT locking. Points
+  # testdb at the service container instead of starting one through
+  # testcontainers: same behavior, no Docker-in-Docker.
+  integration:
+    name: integration
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: ithaca
+          POSTGRES_PASSWORD: ithaca
+          POSTGRES_DB: ithaca
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ithaca"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: integration tests
+        run: go test -race -count=1 -tags=integration -timeout=10m ./...
+        env:
+          ITHACA_TEST_DATABASE_URL: postgres://ithaca:ithaca@localhost:5432/postgres?sslmode=disable
+
+  # sqlc output is committed. If someone edits a query or a migration and
+  # forgets to regenerate, this fails rather than letting Go and SQL drift.
+  sqlc:
+    name: sqlc drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: sqlc diff
+        run: make generate-check

@@ -18,6 +18,7 @@ import (
 	"github.com/SharmaSanskar/ithaca/internal/platform/metrics"
 	"github.com/SharmaSanskar/ithaca/internal/platform/shutdown"
 	"github.com/SharmaSanskar/ithaca/internal/platform/version"
+	"github.com/SharmaSanskar/ithaca/internal/store"
 )
 
 // app is the shared skeleton every service is built on: config, logger,
@@ -28,6 +29,9 @@ type app struct {
 	metrics *metrics.Registry
 	health  *health.Registry
 	runner  *shutdown.Runner
+
+	// store is opened by the services that need Postgres (see openStore).
+	store *store.Store
 }
 
 func newApp(cfg *config.Config) *app {
@@ -84,6 +88,24 @@ func newApp(cfg *config.Config) *app {
 	})
 
 	return a
+}
+
+// openStore creates the Postgres pool and makes it a readiness dependency.
+//
+// Readiness, NOT liveness: a pod that cannot reach Postgres should leave the
+// load balancer, not be restarted. Restarting every pod during a database blip
+// turns a blip into an outage.
+func (a *app) openStore() error {
+	if a.store != nil {
+		return nil
+	}
+	s, err := store.Open(context.Background(), a.cfg.Postgres, a.log)
+	if err != nil {
+		return err
+	}
+	a.store = s
+	a.health.Register("postgres", true, 2*time.Second, s.Ping)
+	return nil
 }
 
 // addAdminListener binds the internal port: probes, metrics, pprof, version.
@@ -165,6 +187,11 @@ func (a *app) run(ctx context.Context) error {
 	a.log.Info("ready")
 
 	err := a.runner.Run(ctx, a.cfg.ShutdownGrace)
+	// The pool closes last, after every listener and worker has drained:
+	// in-flight requests still need their connections while draining.
+	if a.store != nil {
+		a.store.Close()
+	}
 	if err != nil {
 		a.log.Error("stopped with error", "error", err)
 		return err

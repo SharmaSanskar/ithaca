@@ -9,9 +9,9 @@
 # impossible to run a dispatcher built from a different commit than the ingest
 # gateway it shares a database schema with.
 
-ARG GO_VERSION=1.25
+ARG GO_VERSION=1.26
 ARG NODE_VERSION=22
-ARG ALPINE_VERSION=3.21
+ARG ALPINE_VERSION=3.23
 
 # ── stage 1: dashboard ───────────────────────────────────────────────────────
 # Built first and separately so a Go-only change does not invalidate the npm

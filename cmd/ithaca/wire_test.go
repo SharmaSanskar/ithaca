@@ -27,6 +27,12 @@ func TestEveryServiceWires(t *testing.T) {
 			t.Setenv("ITHACA_ENV", "dev")
 			t.Setenv("ITHACA_HTTP_ADDR", "127.0.0.1:0")
 			t.Setenv("ITHACA_ADMIN_ADDR", "127.0.0.1:0")
+			// Unreachable on purpose. The pool is lazy, so wiring and a clean
+			// shutdown must both work with the database down — the same
+			// property that lets a pod boot and report not-ready during a
+			// Postgres outage instead of crash-looping.
+			t.Setenv("ITHACA_DATABASE_URL", "postgres://ithaca:ithaca@127.0.0.1:1/ithaca?sslmode=disable&connect_timeout=1")
+			t.Setenv("ITHACA_DB_MIN_CONNS", "0")
 
 			cfg, err := config.Load(svc)
 			if err != nil {
