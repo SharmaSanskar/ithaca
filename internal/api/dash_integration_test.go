@@ -45,7 +45,9 @@ func TestDashboardAndDemoControlsOverHTTP(t *testing.T) {
 	cp := api.NewControlPlane(s, 50)
 	cp.RestrictURLs("http://sinks.internal:8090/sink/")
 	dash := api.NewDashboard(s, cp)
-	controls := &api.DemoControls{Redis: rdb, PerMinute: 5}
+	// A private namespace: a developer's running demo shares this Redis.
+	ns := "test-" + seed.TenantID.String()
+	controls := &api.DemoControls{Redis: rdb, PerMinute: 5, Namespace: ns}
 	r := chi.NewRouter()
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Group(func(r chi.Router) {
@@ -154,7 +156,7 @@ func TestDashboardAndDemoControlsOverHTTP(t *testing.T) {
 	}
 
 	// With a "runtime" listening, commands are published, validated and clamped.
-	sub := rdb.Subscribe(ctx, demo.CommandChannel)
+	sub := rdb.Subscribe(ctx, demo.Keys(ns).Command)
 	defer sub.Close()
 	if _, err := sub.Receive(ctx); err != nil {
 		t.Fatal(err)
@@ -162,7 +164,7 @@ func TestDashboardAndDemoControlsOverHTTP(t *testing.T) {
 	ch := sub.Channel()
 	// A fresh rate-limit window. Delete only our own keys: Redis is shared
 	// with every other package's tests in CI, so FLUSHDB would be sabotage.
-	if keys, _ := rdb.Keys(ctx, "ithaca:rl:demo:*").Result(); len(keys) > 0 {
+	if keys, _ := rdb.Keys(ctx, "ithaca:rl:demo:"+ns+":*").Result(); len(keys) > 0 {
 		rdb.Del(ctx, keys...)
 	}
 	if c, _ := send("PUT", "/demo/sinks/billing", `{"latency_ms":999999,"fail_rate":7,"hang":true}`); c != http.StatusAccepted {

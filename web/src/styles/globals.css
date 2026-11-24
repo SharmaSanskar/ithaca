@@ -214,3 +214,45 @@
       0 16px 48px -12px oklch(0 0 0 / 60%);
   }
 }
+
+/* The replay edge: the only CSS animation on the canvas chrome. */
+@keyframes ithaca-dash {
+  to {
+    stroke-dashoffset: -8;
+  }
+}
+
+/* React Flow ships with light chrome; strip it so nodes are just our panels. */
+.react-flow__node {
+  cursor: default;
+}
+.react-flow__pane {
+  cursor: default;
+}
+.react-flow__renderer {
+  z-index: 0;
+}
+
+/* Recency wash for live-feed rows: a 2px left border in the status color that
+ * fades out over 600ms. Color only, zero layout, survives 40 rows/s. */
+@keyframes ithaca-wash {
+  from {
+    box-shadow: inset 2px 0 0 var(--wash);
+  }
+  to {
+    box-shadow: inset 2px 0 0 transparent;
+  }
+}
+.recency {
+  animation: ithaca-wash 600ms ease-out;
+}
+
+/* React Flow's attribution stays (the authors ask that only Pro subscribers
+ * hide it); it is just restyled into the chrome's quiet ink. */
+.react-flow__attribution {
+  background: transparent !important;
+  font-size: 9px;
+}
+.react-flow__attribution a {
+  color: var(--fg-4) !important;
+}

@@ -33,6 +33,7 @@ type Snapshot struct {
 	Endpoints     []SnapshotEndpoint
 	DLQ           int64
 	PausedStreams int64
+	Retrying      int64
 }
 
 // Snapshotter reads a tenant's current state from the source of truth.
@@ -73,7 +74,17 @@ type Hub struct {
 	clients map[*client]struct{}
 	seq     uint64
 	rng     *rand.Rand
+	pools   map[string]poolEntry // per dispatcher process
 }
+
+type poolEntry struct {
+	stat PoolStat
+	at   time.Time
+}
+
+// poolTTL drops a dispatcher that stopped reporting (scaled down, crashed),
+// so the worker strip shrinks instead of showing ghosts.
+const poolTTL = 3 * time.Second
 
 type tenantState struct {
 	win      Batch
@@ -102,6 +113,7 @@ func NewHub(snap Snapshotter, log *slog.Logger, reg prometheus.Registerer) *Hub 
 		frameTick: window, snapTick: time.Second,
 		tenants: map[uuid.UUID]*tenantState{},
 		clients: map[*client]struct{}{},
+		pools:   map[string]poolEntry{},
 		rng:     rand.New(rand.NewPCG(rand.Uint64(), rand.Uint64())), //nolint:gosec // sampling
 	}
 }
@@ -157,6 +169,10 @@ func (h *Hub) ingest(msg []byte) {
 		}
 		var data any = e.Delta.Data
 		h.broadcastDelta(e.Tenant, nil, DeltaMsg{Type: "delta", Kind: e.Delta.Kind, ID: e.Delta.ID, Data: data})
+	case "pool":
+		if e.Pool != nil {
+			h.pools[e.Pool.Process] = poolEntry{stat: *e.Pool, at: time.Now()}
+		}
 	case "narration":
 		if e.Narration == nil {
 			return
@@ -225,6 +241,7 @@ func (h *Hub) emitFrames() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	now := time.Now().UnixMilli()
+	pool := h.fleetPool()
 	for id, t := range h.tenants {
 		win := t.win
 		t.win, t.plain = Batch{}, 0
@@ -234,6 +251,7 @@ func (h *Hub) emitFrames() {
 		h.seq++
 		f := h.buildFrame(t, win, now)
 		f.Seq = h.seq
+		f.Pool = pool
 
 		f.Ch = ChanFlow
 		flow, _ := json.Marshal(f)
@@ -264,6 +282,21 @@ func (h *Hub) emitFrames() {
 	}
 }
 
+// fleetPool sums the live dispatchers. Caller holds h.mu.
+func (h *Hub) fleetPool() Pool {
+	var p Pool
+	for proc, e := range h.pools {
+		if time.Since(e.at) > poolTTL {
+			delete(h.pools, proc)
+			continue
+		}
+		p.Workers += e.stat.Workers
+		p.Busy += e.stat.Busy
+		p.Processes++
+	}
+	return p
+}
+
 func (h *Hub) buildFrame(t *tenantState, win Batch, now int64) Frame {
 	f := Frame{Type: "frame", T: now, WindowMS: int(h.frameTick.Milliseconds()), Ingested: win.Ingested,
 		Samples: win.Samples, Endpoints: make([]FrameEndpoint, 0, len(t.snap.Endpoints))}
@@ -280,7 +313,7 @@ func (h *Hub) buildFrame(t *tenantState, win Batch, now int64) Frame {
 		pending += e.Depth
 		f.Endpoints = append(f.Endpoints, fe)
 	}
-	f.Totals = Totals{Pending: pending, DLQ: t.snap.DLQ, PausedStreams: t.snap.PausedStreams}
+	f.Totals = Totals{Pending: pending, Retrying: t.snap.Retrying, DLQ: t.snap.DLQ, PausedStreams: t.snap.PausedStreams}
 	return f
 }
 

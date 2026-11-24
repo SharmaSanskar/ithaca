@@ -404,3 +404,27 @@ func TestNoFrameBeforeTheFirstSnapshot(t *testing.T) {
 		t.Fatalf("emitted %v before the snapshot loaded; the dashboard would flash an empty graph", m)
 	}
 }
+
+func TestFramesCarryFleetWidePoolOccupancy(t *testing.T) {
+	h, fs := newTestHub()
+	tenant := uuid.New()
+	fs.set(tenant, Snapshot{})
+	c := attach(h, tenant, ChanFlow)
+	for _, ps := range []PoolStat{{Process: "a", Workers: 64, Busy: 10}, {Process: "b", Workers: 64, Busy: 5}} {
+		b, _ := json.Marshal(Envelope{Kind: "pool", Pool: &ps})
+		h.ingest(b)
+	}
+	h.emitFrames()
+	pool := messages(t, c)[0]["pool"].(map[string]any)
+	if pool["workers"] != float64(128) || pool["busy"] != float64(15) || pool["processes"] != float64(2) {
+		t.Errorf("pool = %v, want the sum over both dispatchers", pool)
+	}
+	// A dispatcher that stops reporting disappears instead of lingering.
+	h.mu.Lock()
+	h.pools["a"] = poolEntry{stat: h.pools["a"].stat, at: time.Now().Add(-time.Minute)}
+	h.mu.Unlock()
+	h.emitFrames()
+	if got := messages(t, c)[0]["pool"].(map[string]any)["workers"]; got != float64(64) {
+		t.Errorf("stale dispatcher still counted: workers = %v", got)
+	}
+}

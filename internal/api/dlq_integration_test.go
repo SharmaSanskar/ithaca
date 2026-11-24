@@ -129,8 +129,11 @@ func TestDLQBrowseReplayAndVerifyOverHTTP(t *testing.T) {
 	if _, res := call(a.APIKey, "POST", "/dlq/replay", body); res["replayed"] != float64(0) {
 		t.Errorf("second click replayed %v more", res["replayed"])
 	}
-	if code, _ := call(a.APIKey, "POST", "/dlq/replay", `{}`); code != http.StatusBadRequest {
-		t.Errorf("replay with no selector: %d, want 400", code)
+	if c, _ := call(a.APIKey, "POST", "/dlq/replay", `{}`); c != http.StatusBadRequest {
+		t.Errorf("replay with no selector: %d, want 400", c)
+	}
+	if _, res := call(a.APIKey, "POST", "/dlq/replay", `{"all":true}`); res["replayed"] != float64(0) {
+		t.Errorf("replay all after everything was replayed: %v, want 0", res)
 	}
 	if code, _ := call(a.APIKey, "GET", "/dlq?cursor=garbage", ""); code != http.StatusBadRequest {
 		t.Errorf("garbage cursor: %d, want 400", code)

@@ -41,7 +41,11 @@ func (p PGSnapshotter) Snapshot(ctx context.Context, tenant uuid.UUID) (Snapshot
 	if err != nil {
 		return Snapshot{}, err
 	}
-	s := Snapshot{DLQ: dlq, PausedStreams: paused, Endpoints: make([]SnapshotEndpoint, 0, len(rows))}
+	retrying, err := p.Store.RetryingDeliveryCount(ctx, tenant)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	s := Snapshot{DLQ: dlq, PausedStreams: paused, Retrying: retrying, Endpoints: make([]SnapshotEndpoint, 0, len(rows))}
 	for _, r := range rows {
 		name := r.Description
 		if name == "" {

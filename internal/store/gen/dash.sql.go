@@ -418,6 +418,19 @@ func (q *Queries) PausedStreamCount(ctx context.Context, tenantID uuid.UUID) (in
 	return column_1, err
 }
 
+const retryingDeliveryCount = `-- name: RetryingDeliveryCount :one
+SELECT count(*)::bigint FROM deliveries d
+WHERE d.tenant_id = $1 AND d.state = 'retrying'
+`
+
+// Deliveries waiting out a backoff: the dashboard's retry buffer.
+func (q *Queries) RetryingDeliveryCount(ctx context.Context, tenantID uuid.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, retryingDeliveryCount, tenantID)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const throughputSeries = `-- name: ThroughputSeries :many
 SELECT to_timestamp(floor(EXTRACT(EPOCH FROM a.created_at) / $1::int) * $1::int)::timestamptz AS bucket,
        count(*) FILTER (WHERE a.outcome = 'success')::bigint AS succeeded,

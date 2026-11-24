@@ -101,13 +101,15 @@ func TestDemoScenariosRunEndToEnd(t *testing.T) {
 
 	svc := ingest.NewService(s, nil)
 	svc.SetObserver(live.IngestObserver{P: pub})
+	// A private namespace: a developer's running demo shares this Redis.
+	keys := demo.Keys("test-" + res.TenantID.String())
 	rt := &demo.Runtime{Store: s, Redis: rdb, Publisher: pub, Ingest: svc, SinkBaseURL: sinks.URL,
-		AmbientRate: 10, ReplayRate: 200, Log: log}
+		AmbientRate: 10, ReplayRate: 200, Log: log, Namespace: "test-" + res.TenantID.String()}
 	go func() { _ = rt.Run(ctx) }()
 
 	// Wait for the runtime to become leader (it publishes state).
 	deadline := time.Now().Add(15 * time.Second)
-	for rdb.Exists(ctx, demo.StateKey).Val() == 0 {
+	for rdb.Exists(ctx, keys.State).Val() == 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("demo runtime never became leader")
 		}
@@ -120,7 +122,7 @@ func TestDemoScenariosRunEndToEnd(t *testing.T) {
 		start := len(lines)
 		mu.Unlock()
 		cmd, _ := json.Marshal(demo.Command{Op: "scenario", Name: name})
-		if n := rdb.Publish(ctx, demo.CommandChannel, cmd).Val(); n == 0 {
+		if n := rdb.Publish(ctx, keys.Command, cmd).Val(); n == 0 {
 			t.Fatal("no runtime subscribed to the command channel")
 		}
 		deadline := time.Now().Add(timeout)

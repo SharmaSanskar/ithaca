@@ -20,9 +20,10 @@ import (
 // a command for the demo runtime (in the worker service); the API itself
 // never touches sinks or generates traffic.
 type DemoControls struct {
-	Redis      *redis.Client
-	PerMinute  int
-	TrustProxy bool
+	Redis     *redis.Client
+	PerMinute int
+	// Namespace must match the runtime's (demo.Keys). "" in production.
+	Namespace string
 }
 
 // Routes mounts /demo.
@@ -52,7 +53,7 @@ func (d *DemoControls) RateLimit(next http.Handler) http.Handler {
 			ip = r.RemoteAddr
 		}
 		now := time.Now()
-		key := fmt.Sprintf("ithaca:rl:demo:%s:%d", ip, now.Unix()/60)
+		key := fmt.Sprintf("ithaca:rl:demo:%s:%s:%d", d.Namespace, ip, now.Unix()/60)
 		n, err := d.Redis.Incr(r.Context(), key).Result()
 		if err != nil {
 			// Fail CLOSED for a public write endpoint: no limiter, no actions.
@@ -72,7 +73,7 @@ func (d *DemoControls) RateLimit(next http.Handler) http.Handler {
 }
 
 func (d *DemoControls) state(w http.ResponseWriter, r *http.Request) {
-	b, err := d.Redis.Get(r.Context(), demo.StateKey).Bytes()
+	b, err := d.Redis.Get(r.Context(), demo.Keys(d.Namespace).State).Bytes()
 	if err == redis.Nil { //nolint:errorlint // sentinel from go-redis
 		httpx.WriteJSON(w, http.StatusOK, demo.State{Scenarios: demo.Scenarios, Sinks: map[string]receiver.Behavior{}})
 		return
@@ -87,7 +88,7 @@ func (d *DemoControls) state(w http.ResponseWriter, r *http.Request) {
 
 func (d *DemoControls) send(w http.ResponseWriter, r *http.Request, c demo.Command) {
 	b, _ := json.Marshal(c)
-	n, err := d.Redis.Publish(r.Context(), demo.CommandChannel, b).Result()
+	n, err := d.Redis.Publish(r.Context(), demo.Keys(d.Namespace).Command, b).Result()
 	if err != nil {
 		httpx.WriteError(w, r, err)
 		return

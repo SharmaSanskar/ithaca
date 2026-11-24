@@ -28,7 +28,7 @@ function Section({
     <section className="panel p-4">
       <header className="mb-4 flex items-baseline justify-between gap-4 border-b border-line-faint pb-2">
         <h2 className="t-micro font-mono text-fg-3">{title}</h2>
-        {note && <p className="t-xs max-w-[52ch] text-right text-fg-4">{note}</p>}
+        {note && <p className="t-xs max-w-[52ch] text-right text-fg-3">{note}</p>}
       </header>
       {children}
     </section>
@@ -45,7 +45,7 @@ function Swatch({ token, label, hint }: { token: string; label: string; hint?: s
       />
       <div className="min-w-0">
         <div className="t-xs truncate font-mono text-fg-2">{label}</div>
-        {hint && <div className="t-micro truncate text-fg-4">{hint}</div>}
+        {hint && <div className="t-micro truncate text-fg-3">{hint}</div>}
       </div>
     </div>
   )
@@ -66,7 +66,7 @@ export default function TokenPalette() {
       <header className="sticky top-0 z-10 flex h-11 items-center gap-4 border-b border-line bg-canvas/85 px-4 backdrop-blur">
         <div className="flex items-baseline gap-2">
           <span className="t-md font-mono font-medium tracking-tight">ithaca</span>
-          <span className="t-micro font-mono text-fg-4">design system</span>
+          <span className="t-micro font-mono text-fg-3">design system</span>
         </div>
 
         <div className="ml-auto flex items-center gap-1.5">
@@ -110,7 +110,7 @@ export default function TokenPalette() {
             <span className="text-fg-2">event state</span> — which is why the six status hues below
             are the entire palette, and why nothing else competes with them for attention.
           </p>
-          <p className="t-xs mt-3 font-mono text-fg-4">
+          <p className="t-xs mt-3 font-mono text-fg-3">
             resolved theme: {resolvedTheme} · density: {density} · base font-size: 13px
           </p>
         </section>
@@ -139,7 +139,7 @@ export default function TokenPalette() {
             ))}
           </div>
 
-          <p className="t-xs mt-4 max-w-[74ch] text-fg-4">
+          <p className="t-xs mt-4 max-w-[74ch] text-fg-3">
             Violet for <span className="font-mono text-fg-3">dead</span>, not a darker red. The
             dead-letter queue is a different destination, not a worse failure — and two reds
             collapse into one under the most common color-vision deficiencies.
@@ -176,11 +176,11 @@ export default function TokenPalette() {
               <p className="t-base text-fg">--fg · primary · 18.1:1</p>
               <p className="t-base text-fg-2">--fg-2 · secondary · 9.8:1</p>
               <p className="t-base text-fg-3">--fg-3 · muted · 5.4:1</p>
-              <p className="t-base text-fg-4">--fg-4 · decorative / large text only · 3.3:1</p>
+              <p className="t-base text-fg-3">--fg-4 · decorative / large text only · 3.3:1</p>
             </div>
             <div className="mt-4 flex items-center gap-2">
-              <Contrast size={13} className="text-fg-4" aria-hidden />
-              <span className="t-xs text-fg-4">
+              <Contrast size={13} className="text-fg-3" aria-hidden />
+              <span className="t-xs text-fg-3">
                 Contrast ratios hold in both themes; --fg-4 never carries body copy.
               </span>
             </div>
@@ -196,7 +196,7 @@ export default function TokenPalette() {
               <Swatch token="--q-2" label="--q-2" hint="p90" />
               <Swatch token="--q-3" label="--q-3" hint="p99" />
             </div>
-            <p className="t-xs mt-4 text-fg-4">
+            <p className="t-xs mt-4 text-fg-3">
               Ithaca ships zero categorical palettes. Comparing endpoints is done with small
               multiples on a shared domain, never eight hues on one chart.
             </p>
@@ -222,7 +222,7 @@ export default function TokenPalette() {
               ] as const
             ).map(([cls, use, extra]) => (
               <div key={cls} className="flex items-baseline gap-4 border-b border-line-faint pb-2">
-                <code className="t-micro w-20 shrink-0 font-mono text-fg-4">{cls}</code>
+                <code className="t-micro w-20 shrink-0 font-mono text-fg-3">{cls}</code>
                 <span className={cn(cls, extra, 'text-fg')}>1,284 ev/s</span>
                 <span className="t-xs ml-auto text-fg-3">{use}</span>
               </div>
@@ -284,14 +284,14 @@ export default function TokenPalette() {
               </tbody>
             </table>
           </div>
-          <p className="t-xs mt-3 text-fg-4">
+          <p className="t-xs mt-3 text-fg-3">
             Thousands are separated with a thin space, not a comma — in a tabular column a comma
             sits on the baseline and clumps the digits into a blob.
           </p>
         </Section>
 
         <footer className="pb-8 pt-2">
-          <p className="t-xs font-mono text-fg-4">
+          <p className="t-xs font-mono text-fg-3">
             phase 0 · foundation. the delivery engine, live canvas and demo console follow.
           </p>
         </footer>

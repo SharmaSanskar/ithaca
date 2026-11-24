@@ -38,7 +38,9 @@
   /* ── text hierarchy (contrast measured against --bg-surface) ── */
   --fg: oklch(0.2 0.008 265); /* 18.1:1  primary   */
   --fg-2: oklch(0.44 0.008 265); /*  7.8:1  secondary */
-  --fg-3: oklch(0.56 0.008 265); /*  4.7:1  muted     */
+  --fg-3: oklch(
+    0.53 0.008 265
+  ); /*  5.0:1  muted — the floor for any small text that carries information (axe-checked) */
   --fg-4: oklch(0.68 0.008 265); /*  2.9:1  LARGE TEXT / decorative only */
 
   /* ── signal: the single brand accent (teal, 195°) ── */

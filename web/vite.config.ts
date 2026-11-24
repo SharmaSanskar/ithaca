@@ -36,6 +36,9 @@ export default defineConfig({
         // every browser cache.
         manualChunks: {
           react: ['react', 'react-dom', 'react-router'],
+          query: ['@tanstack/react-query'],
+          flow: ['@xyflow/react'],
+          charts: ['uplot'],
         },
       },
     },

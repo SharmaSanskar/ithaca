@@ -21,11 +21,11 @@ the product cannot exist without one.
 
 ## Status
 
-**Phase 4 — The live layer.** Ingest and the dispatcher stream what they do (post-commit, never
-blocking) through Redis to a WebSocket hub, which sends every dashboard a 10Hz frame of exact
-counts plus lossless entity deltas reconciled from Postgres. A self-running demo drives the real
-system through five narrated scenarios: happy path, endpoint down, slow consumer, bad deploy, and
-recovery with replay.
+**Phase 5 — The dashboard.** A live flow canvas where every particle is a real event (sampled
+honestly, with the true rate on every edge), the five narrated demo scenarios one click away,
+event detail with the retry ladder drawn to scale, endpoints, and the dead-letter queue with
+replay. 60fps at the demo's maximum traffic, zero WCAG A/AA violations in both themes, and a
+reduced-motion mode in which nothing moves and every number remains.
 
 | Phase | | |
 |---|---|---|
@@ -33,9 +33,9 @@ recovery with replay.
 | 1 | Data model + ingest | done |
 | 2 | Queue, bounded worker pool, delivery | done |
 | 3 | DLQ replay, circuit breaker, endpoint verification | done |
-| 4 | Live layer: WebSocket hub + demo scenario engine | **done** |
-| 5 | Dashboard | next |
-| 6 | Benchmarks + Grafana dashboards | |
+| 4 | Live layer: WebSocket hub + demo scenario engine | done |
+| 5 | Dashboard | **done** |
+| 6 | Benchmarks + Grafana dashboards | next |
 | 7 | Ship: public demo + write-up | |
 | 8 | Kubernetes (k3d + Kustomize) | |
 | 9 | KEDA autoscaling on queue depth | |
@@ -66,14 +66,13 @@ the same key.
 Or run the whole self-driving demo:
 
 ```bash
-make up && make demo            # seed the demo tenant, start everything in demo mode
-curl -X POST localhost:8080/api/v1/demo/scenarios/endpoint_down
-# live feed: ws://localhost:8082/ws  →  {"op":"subscribe","ch":"flow"} and {"op":"subscribe","ch":"demo"}
+make up && make web-install && make demo   # seed the demo tenant, start everything in demo mode
+open http://localhost:5173                 # the dashboard (Vite, proxying /api and /ws)
 ```
 
 | | |
 |---|---|
-| Dashboard | <http://localhost:5173/design> |
+| Dashboard | <http://localhost:5173> (design tokens at `/design`) |
 | API · ingest · ws · receiver-sim | :8080 · :8081 · :8082 · :8090 |
 | Health / metrics (per service) | <http://localhost:9080/readyz> · <http://localhost:9080/metrics> |
 | Grafana | <http://localhost:3000> |

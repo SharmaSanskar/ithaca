@@ -146,6 +146,7 @@ func (a *app) wireDispatcher() error {
 	// running until the pool has drained.
 	if pub := a.livePublisher(); pub != nil {
 		pool.SetObserver(live.DispatchObserver{P: pub})
+		pub.ReportPool(workerID(), func() (int, int) { return slots.Cap(), slots.TakePeak() })
 	}
 	a.runner.Add(shutdown.Component{Name: "pool", Run: pool.Run, Stop: pool.Shutdown})
 	a.runner.Add(shutdown.Component{Name: "reaper", Run: (&worker.Reaper{

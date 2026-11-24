@@ -45,6 +45,19 @@ type Publisher struct {
 	rng  *rand.Rand
 	out  chan []byte
 	drop prometheus.Counter
+
+	// pool, when set, reports this process's worker-pool occupancy with
+	// every flush (dispatchers only).
+	pool    func() (workers, busy int)
+	process string
+}
+
+// ReportPool makes every flush include this process's worker-pool
+// occupancy, so the dashboard can draw the bounded pool as it really is.
+func (p *Publisher) ReportPool(process string, f func() (workers, busy int)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.process, p.pool = process, f
 }
 
 type accum struct {
@@ -198,10 +211,15 @@ func (p *Publisher) Flush() {
 	p.mu.Lock()
 	cur := p.cur
 	p.cur = make(map[uuid.UUID]*accum, len(cur))
+	pool, process := p.pool, p.process
 	p.mu.Unlock()
 	for tenant, a := range cur {
 		b := a.b
 		p.enqueue(Envelope{Kind: "batch", Tenant: tenant, Batch: &b})
+	}
+	if pool != nil {
+		w, busy := pool()
+		p.enqueue(Envelope{Kind: "pool", Pool: &PoolStat{Process: process, Workers: w, Busy: busy}})
 	}
 }
 

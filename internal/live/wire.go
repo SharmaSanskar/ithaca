@@ -33,11 +33,20 @@ const Channel = "ithaca:live"
 
 // Envelope is one Redis message.
 type Envelope struct {
-	Kind      string     `json:"k"` // "batch" | "delta" | "narration"
+	Kind      string     `json:"k"` // "batch" | "delta" | "narration" | "pool"
 	Tenant    uuid.UUID  `json:"tn"`
 	Batch     *Batch     `json:"b,omitempty"`
 	Delta     *Delta     `json:"d,omitempty"`
 	Narration *Narration `json:"n,omitempty"`
+	Pool      *PoolStat  `json:"p,omitempty"`
+}
+
+// PoolStat is one dispatcher process's worker-pool occupancy. It is not
+// tenant-scoped: the pool is shared, and the dashboard shows the whole fleet.
+type PoolStat struct {
+	Process string `json:"proc"`
+	Workers int    `json:"workers"`
+	Busy    int    `json:"busy"`
 }
 
 // Batch is one process's 100ms window for one tenant.
@@ -121,7 +130,15 @@ type Frame struct {
 	Ingested  int             `json:"ingested"`
 	Endpoints []FrameEndpoint `json:"endpoints"`
 	Totals    Totals          `json:"totals"`
+	Pool      Pool            `json:"pool"`
 	Samples   []Sample        `json:"samples"`
+}
+
+// Pool is fleet-wide worker occupancy: the sum over live dispatchers.
+type Pool struct {
+	Workers   int `json:"workers"`
+	Busy      int `json:"busy"`
+	Processes int `json:"processes"`
 }
 
 // FrameEndpoint is one endpoint's slice of a frame.
@@ -142,6 +159,7 @@ type FrameEndpoint struct {
 // Totals are tenant-wide gauges, refreshed once a second.
 type Totals struct {
 	Pending       int64 `json:"pending"`
+	Retrying      int64 `json:"retrying"` // pending deliveries waiting out a backoff
 	DLQ           int64 `json:"dlq"`
 	PausedStreams int64 `json:"paused_streams"`
 }

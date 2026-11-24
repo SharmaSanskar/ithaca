@@ -91,7 +91,10 @@ func (c *ControlPlane) listDLQ(w http.ResponseWriter, r *http.Request) {
 type replayReq struct {
 	IDs        []uuid.UUID `json:"ids"`
 	EndpointID *uuid.UUID  `json:"endpoint_id"`
-	Limit      int         `json:"limit"`
+	// All replays the oldest open dead letters across every endpoint (still
+	// capped at 1000 per call, and rate-ramped per endpoint).
+	All   bool `json:"all"`
+	Limit int  `json:"limit"`
 }
 
 func (c *ControlPlane) replayDLQ(w http.ResponseWriter, r *http.Request) {
@@ -100,9 +103,9 @@ func (c *ControlPlane) replayDLQ(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, err)
 		return
 	}
-	if len(req.IDs) == 0 && req.EndpointID == nil {
+	if len(req.IDs) == 0 && req.EndpointID == nil && !req.All {
 		httpx.WriteError(w, r, httpx.ErrBadRequest.WithMessage(
-			`Say what to replay: {"ids": [...]} or {"endpoint_id": "...", "limit": n}.`))
+			`Say what to replay: {"ids": [...]}, {"endpoint_id": "...", "limit": n} or {"all": true}.`))
 		return
 	}
 	if len(req.IDs) > dlq.MaxBatch || req.Limit > dlq.MaxBatch {

@@ -59,6 +59,21 @@ func TestSlotsBlockUntilReleasedOrCanceled(t *testing.T) {
 	})
 }
 
+func TestSlotsPeakCatchesShortBursts(t *testing.T) {
+	s := NewSlots(8)
+	n := s.AcquireUpTo(context.Background(), 5)
+	s.Release(n) // a burst that is over before anyone samples InFlight
+	if s.InFlight() != 0 {
+		t.Fatal("setup")
+	}
+	if got := s.TakePeak(); got != 5 {
+		t.Errorf("peak = %d, want 5: the burst must be visible after the fact", got)
+	}
+	if got := s.TakePeak(); got != 0 {
+		t.Errorf("second TakePeak = %d, want 0: each window starts fresh", got)
+	}
+}
+
 func TestSlotsOverReleasePanics(t *testing.T) {
 	defer func() {
 		if recover() == nil {

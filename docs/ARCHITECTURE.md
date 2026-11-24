@@ -184,6 +184,20 @@ receiver-sim sinks. Its narration quotes measured numbers ("ingest p99 9.4ms"), 
 The public dashboard API is read-only; demo buttons are validated, clamped and rate-limited per IP,
 and in demo mode endpoints can only target the built-in sinks.
 
+## The dashboard
+
+A Vite + React SPA compiled into the Go binary. Two stores, with a hard line between them:
+**TanStack Query** owns entities (endpoints, events, dead letters) and never sees the firehose;
+the **StreamStore** owns the 10Hz stream and never sets React state per message. WebSocket deltas
+cross the line through `setQueryData` with a revision guard, and only ever *patch* cached rows.
+
+The flow canvas is React Flow for the chrome and a single `<canvas>` for particles, driven by a
+rAF loop outside React (typed arrays, a free list, no allocation in the hot loop). The particle
+rules are about honesty: particles are a capped sample and the real rate is always on the edge
+label (with a `~1:N` chip when sampled); a failure is never sampled out; speed encodes latency and
+nothing else; above 200/s an edge becomes a flow band. Under reduced motion nothing moves, and
+the bands step between a few quantized levels instead of tracking every fluctuation.
+
 ### Measured, not assumed
 
 Things the tests measured that changed the implementation:
@@ -209,6 +223,13 @@ Things the tests measured that changed the implementation:
   probe timed out. Probes now take the first pending message regardless of due time.
 - **A first frame with no endpoints.** A new dashboard's first frame could beat the hub's first
   Postgres snapshot and render an empty graph for 100ms. Frames now wait for the snapshot.
+- **An instantaneous gauge hid a saturated pool.** Sampling worker-pool occupancy every 100ms
+  showed "0 of 64 busy" at 400 deliveries/s, because each delivery takes 40ms. Reporting the *peak*
+  per window showed the truth: ~61 of 64. The ordered subscription keys a stream per order id, so
+  each lease carries one or two deliveries and the per-lease overhead dominates.
+- **Contrast is a measurement.** The design tokens reserve the dimmest ink for large or decorative
+  text; using it for timestamps and units failed WCAG AA on every page. axe-core now runs against
+  every page in both themes, with zero violations.
 - **Panics on errgroup goroutines.** `recover()` only catches panics on its own goroutine, so a
   `recover` around a drain loop never sees a panic in a concurrent delivery. One bad delivery would
   have crashed the whole dispatcher. The recover lives on the goroutine that runs the attempt.

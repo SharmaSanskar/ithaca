@@ -1,6 +1,9 @@
 package worker
 
-import "context"
+import (
+	"context"
+	"sync/atomic"
+)
 
 // Slots is a counting semaphore with PARTIAL acquisition. It is the whole
 // backpressure mechanism, and it is not in the standard library.
@@ -14,6 +17,11 @@ import "context"
 // must be cancellable by a context, which a Cond cannot do.
 type Slots struct {
 	tokens chan struct{}
+	// peak is the high-water mark of InFlight since the last TakePeak. An
+	// instantaneous gauge sampled every 100ms misses short deliveries
+	// entirely (40ms requests leave the pool "idle" at most sampling
+	// instants); the peak shows how much of the pool the window really used.
+	peak atomic.Int64
 }
 
 // NewSlots creates a semaphore with n slots, all free.
@@ -43,10 +51,28 @@ func (s *Slots) AcquireUpTo(ctx context.Context, max int) int {
 		case <-s.tokens:
 			n++
 		default:
+			s.notePeak()
 			return n
 		}
 	}
+	s.notePeak()
 	return n
+}
+
+func (s *Slots) notePeak() {
+	cur := int64(s.InFlight())
+	for {
+		p := s.peak.Load()
+		if cur <= p || s.peak.CompareAndSwap(p, cur) {
+			return
+		}
+	}
+}
+
+// TakePeak returns the highest occupancy since the previous call and starts a
+// new window at the current occupancy.
+func (s *Slots) TakePeak() int {
+	return int(max(s.peak.Swap(int64(s.InFlight())), int64(s.InFlight())))
 }
 
 // Release returns n slots.

@@ -21,6 +21,11 @@ WHERE tenant_id = @tenant_id AND final_state = 'dead' AND replayed_at IS NULL;
 -- name: PausedStreamCount :one
 SELECT count(*)::bigint FROM delivery_streams WHERE tenant_id = @tenant_id AND state = 'paused';
 
+-- name: RetryingDeliveryCount :one
+-- Deliveries waiting out a backoff: the dashboard's retry buffer.
+SELECT count(*)::bigint FROM deliveries d
+WHERE d.tenant_id = @tenant_id AND d.state = 'retrying';
+
 -- name: ListRecentEvents :many
 -- The event feed, newest first, keyset-paginated. Delivery status is
 -- summarized per event: pending (still in the queue) and terminal counts.

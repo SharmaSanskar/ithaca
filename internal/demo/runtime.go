@@ -20,6 +20,10 @@ import (
 
 // Redis keys. Commands go API → runtime over pub/sub; the runtime publishes
 // its state to a key with a TTL, so a dead leader's state disappears.
+//
+// Both live under a namespace ("" in production) so that two demos sharing
+// one Redis — a developer's local stack and the integration tests, say — can
+// never receive each other's commands.
 const (
 	CommandChannel = "ithaca:demo:cmd"
 	StateKey       = "ithaca:demo:state"
@@ -67,6 +71,8 @@ type Runtime struct {
 	AmbientRate int
 	ReplayRate  int
 	Log         *slog.Logger
+	// Namespace isolates this demo's Redis keys (see Keys). "" in production.
+	Namespace string
 
 	store      *store.Store
 	sinks      *SinkClient
@@ -137,7 +143,7 @@ func (rt *Runtime) lead(ctx context.Context) error {
 	defer cancel()
 	go func() { _ = rt.gen.Run(ctx) }()
 
-	cmds := rt.Redis.Subscribe(ctx, CommandChannel)
+	cmds := rt.Redis.Subscribe(ctx, Keys(rt.Namespace).Command)
 	defer func() { _ = cmds.Close() }()
 	ch := cmds.Channel()
 	tick := time.NewTicker(2 * time.Second)
@@ -275,9 +281,20 @@ func (rt *Runtime) publishState(ctx context.Context) {
 		}
 	}
 	b, _ := json.Marshal(st)
-	if err := rt.Redis.Set(ctx, StateKey, b, stateTTL).Err(); err != nil && ctx.Err() == nil {
+	if err := rt.Redis.Set(ctx, Keys(rt.Namespace).State, b, stateTTL).Err(); err != nil && ctx.Err() == nil {
 		rt.log.Warn("publish demo state failed", "error", err)
 	}
+}
+
+// RedisKeys are the demo's Redis names within one namespace.
+type RedisKeys struct{ Command, State string }
+
+// Keys returns the command channel and state key for a namespace.
+func Keys(namespace string) RedisKeys {
+	if namespace == "" {
+		return RedisKeys{Command: CommandChannel, State: StateKey}
+	}
+	return RedisKeys{Command: CommandChannel + ":" + namespace, State: StateKey + ":" + namespace}
 }
 
 func knownSink(id string) bool {
