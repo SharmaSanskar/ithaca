@@ -28,3 +28,74 @@ func (q *Queries) DeleteExpiredIdempotencyKeys(ctx context.Context, batchSize in
 	}
 	return result.RowsAffected(), nil
 }
+
+const deleteOldAttempts = `-- name: DeleteOldAttempts :execrows
+
+DELETE FROM delivery_attempts
+WHERE id IN (SELECT a.id FROM delivery_attempts a
+             WHERE a.created_at < now() - interval '1 second' * $1::bigint
+             LIMIT $2)
+`
+
+type DeleteOldAttemptsParams struct {
+	OlderThanSeconds int64
+	BatchSize        int32
+}
+
+// Retention. Batched DELETEs: this is the honest small-scale substitute for
+// time partitions + DROP TABLE (see ARCHITECTURE.md). Each statement deletes
+// at most @batch_size rows so no single sweep holds locks or bloats WAL.
+func (q *Queries) DeleteOldAttempts(ctx context.Context, arg DeleteOldAttemptsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteOldAttempts, arg.OlderThanSeconds, arg.BatchSize)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deleteOldEvents = `-- name: DeleteOldEvents :execrows
+DELETE FROM events
+WHERE id IN (SELECT ev.id FROM events ev
+             WHERE ev.created_at < now() - interval '1 second' * $1::bigint
+               AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.event_id = ev.id)
+               AND NOT EXISTS (SELECT 1 FROM deliveries_history h
+                               WHERE h.event_id = ev.id AND h.final_state = 'dead' AND h.replayed_at IS NULL)
+             LIMIT $2)
+`
+
+type DeleteOldEventsParams struct {
+	OlderThanSeconds int64
+	BatchSize        int32
+}
+
+// Never an event that still has a pending delivery (the dispatcher reads its
+// payload at delivery time) or an unreplayed dead letter (replay needs it).
+func (q *Queries) DeleteOldEvents(ctx context.Context, arg DeleteOldEventsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteOldEvents, arg.OlderThanSeconds, arg.BatchSize)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deleteOldHistory = `-- name: DeleteOldHistory :execrows
+DELETE FROM deliveries_history
+WHERE id IN (SELECT h.id FROM deliveries_history h
+             WHERE h.completed_at < now() - interval '1 second' * $1::bigint
+               AND (h.final_state <> 'dead' OR h.replayed_at IS NOT NULL)
+             LIMIT $2)
+`
+
+type DeleteOldHistoryParams struct {
+	OlderThanSeconds int64
+	BatchSize        int32
+}
+
+// Dead letters are kept: an operator may still want to replay them.
+func (q *Queries) DeleteOldHistory(ctx context.Context, arg DeleteOldHistoryParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteOldHistory, arg.OlderThanSeconds, arg.BatchSize)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}

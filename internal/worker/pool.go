@@ -42,6 +42,15 @@ type Executor interface {
 	Execute(ctx context.Context, l *queue.Lease, m queue.Message) (r queue.Result, ok bool)
 }
 
+// Observer is told about every ack AFTER it commits: what was delivered,
+// retried or dead-lettered, and any endpoint side effects. It must not block.
+// Observing after the commit (never before) keeps the at-least-once window
+// minimal: nothing — not even a dashboard update — sits between an HTTP 200
+// and the ack.
+type Observer interface {
+	Acked(l *queue.Lease, results []queue.Result, o queue.AckOutcome)
+}
+
 // Config tunes the pool.
 type Config struct {
 	WorkerID        string
@@ -76,6 +85,7 @@ type Pool struct {
 	log   *slog.Logger
 	m     *Metrics
 	clock clock.Clock
+	obs   Observer
 
 	// leases is UNBUFFERED, on purpose. A buffer is a second, invisible queue:
 	// the semaphore would say N in flight while more sit in the buffer, and
@@ -99,6 +109,9 @@ func New(cfg Config, q queue.Queue, exec Executor, slots *Slots, log *slog.Logge
 		done:          make(chan struct{}),
 	}
 }
+
+// SetObserver installs a post-ack observer (the live dashboard feed).
+func (p *Pool) SetObserver(o Observer) { p.obs = o }
 
 // Run starts the dispatcher and workers and blocks until every worker has
 // exited. Canceling ctx is an immediate hard stop (in-flight requests are
@@ -432,6 +445,9 @@ func (p *Pool) ack(ctx context.Context, l *queue.Lease, results []queue.Result, 
 	switch {
 	case err == nil:
 		p.reportAckOutcome(l, outcome)
+		if p.obs != nil {
+			p.obs.Acked(l, results, outcome)
+		}
 		for _, r := range results {
 			switch r.Disposition {
 			case queue.Succeeded:

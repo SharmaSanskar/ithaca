@@ -33,6 +33,10 @@ func TestEveryServiceWires(t *testing.T) {
 			// Postgres outage instead of crash-looping.
 			t.Setenv("ITHACA_DATABASE_URL", "postgres://ithaca:ithaca@127.0.0.1:1/ithaca?sslmode=disable&connect_timeout=1")
 			t.Setenv("ITHACA_DB_MIN_CONNS", "0")
+			// Likewise unreachable: the ws hub and live publisher must boot
+			// (and shut down) with Redis down.
+			t.Setenv("ITHACA_REDIS_URL", "redis://127.0.0.1:1/0")
+			t.Setenv("ITHACA_DEMO_MODE", "true")
 
 			cfg, err := config.Load(svc)
 			if err != nil {

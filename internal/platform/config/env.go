@@ -64,7 +64,7 @@ func (l *loader) int(key string, def int) int {
 	return n
 }
 
-func (l *loader) bool(key string, def bool) bool {
+func (l *loader) bool(key string, def bool) bool { //nolint:unparam // every default is spelled out at its call site on purpose
 	v, ok := lookup(key)
 	if !ok {
 		return def

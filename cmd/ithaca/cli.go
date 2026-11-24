@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/SharmaSanskar/ithaca/internal/auth"
+	"github.com/SharmaSanskar/ithaca/internal/demo"
 	"github.com/SharmaSanskar/ithaca/internal/platform/config"
 	"github.com/SharmaSanskar/ithaca/internal/platform/logging"
 	"github.com/SharmaSanskar/ithaca/internal/store"
@@ -74,5 +75,36 @@ func runTenant(args []string) error {
 	}
 	fmt.Printf("tenant_id=%s\napi_key=%s\n", p.TenantID, p.APIKey)
 	fmt.Fprintln(os.Stderr, "\nStore the API key now; it cannot be shown again.")
+	return nil
+}
+
+// runDemo: `ithaca demo seed` — create the demo tenant and its sink endpoints
+// (idempotent). The endpoints verify themselves within seconds once the
+// dispatcher and receiver-sim are running.
+func runDemo(args []string) error {
+	if len(args) < 1 || args[0] != "seed" {
+		return errors.New("usage: ithaca demo seed")
+	}
+	cfg, err := config.Load(config.ServiceCLI)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	s, err := store.Open(ctx, cfg.Postgres, nil)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	res, err := demo.Seed(ctx, s, cfg.Demo.SinkBaseURL)
+	if err != nil {
+		return err
+	}
+	if !res.Created {
+		fmt.Printf("demo tenant already exists: %s\n", res.TenantID)
+		return nil
+	}
+	fmt.Printf("tenant_id=%s\napi_key=%s\n", res.TenantID, res.APIKey)
+	fmt.Fprintf(os.Stderr, "\nSeeded %d endpoints pointing at %s/sink/<id>.\n", len(demo.Sinks), cfg.Demo.SinkBaseURL)
 	return nil
 }

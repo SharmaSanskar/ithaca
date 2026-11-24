@@ -10,14 +10,17 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
+	"github.com/SharmaSanskar/ithaca/internal/live"
 	"github.com/SharmaSanskar/ithaca/internal/platform/config"
 	"github.com/SharmaSanskar/ithaca/internal/platform/health"
 	"github.com/SharmaSanskar/ithaca/internal/platform/httpx"
 	"github.com/SharmaSanskar/ithaca/internal/platform/logging"
 	"github.com/SharmaSanskar/ithaca/internal/platform/metrics"
 	"github.com/SharmaSanskar/ithaca/internal/platform/otelx"
+	"github.com/SharmaSanskar/ithaca/internal/platform/redisx"
 	"github.com/SharmaSanskar/ithaca/internal/platform/shutdown"
 	"github.com/SharmaSanskar/ithaca/internal/platform/version"
 	"github.com/SharmaSanskar/ithaca/internal/store"
@@ -37,6 +40,10 @@ type app struct {
 
 	// otelShutdown flushes buffered spans on exit.
 	otelShutdown func(context.Context) error
+
+	// redis and pub are opened on demand (openRedis, livePublisher).
+	redis *redis.Client
+	pub   *live.Publisher
 }
 
 func newApp(cfg *config.Config) *app {
@@ -126,6 +133,42 @@ func (a *app) openStore() error {
 	a.store = s
 	a.health.Register("postgres", true, 2*time.Second, s.Ping)
 	return nil
+}
+
+// openRedis opens the Redis client. critical decides its readiness weight:
+// the ws hub cannot work without it, but a dispatcher must keep delivering
+// through a Redis outage, so there it is reported, not gating.
+func (a *app) openRedis(critical bool) (*redis.Client, error) {
+	if a.redis != nil {
+		return a.redis, nil
+	}
+	c, err := redisx.Open(a.cfg.Redis.URL)
+	if err != nil {
+		return nil, err
+	}
+	a.redis = c
+	a.health.Register("redis", critical, time.Second, redisx.Ping(c))
+	return c, nil
+}
+
+// livePublisher returns the live-feed publisher, or nil when Redis is not
+// configured (the live dashboard is optional; delivery is not).
+func (a *app) livePublisher() *live.Publisher {
+	if a.pub != nil {
+		return a.pub
+	}
+	if a.cfg.Redis.URL == "" {
+		a.log.Info("ITHACA_REDIS_URL not set; live dashboard feed disabled")
+		return nil
+	}
+	c, err := a.openRedis(false)
+	if err != nil {
+		a.log.Warn("live feed disabled", "error", err)
+		return nil
+	}
+	a.pub = live.NewPublisher(live.NewRedisBus(c), a.log.With("component", "live"), a.metrics.Registerer())
+	a.runner.Add(shutdown.Component{Name: "live-publisher", Run: a.pub.Run})
+	return a.pub
 }
 
 // addAdminListener binds the internal port: probes, metrics, pprof, version.
@@ -220,6 +263,9 @@ func (a *app) run(ctx context.Context) error {
 	// in-flight requests still need their connections while draining.
 	if a.store != nil {
 		a.store.Close()
+	}
+	if a.redis != nil {
+		_ = a.redis.Close()
 	}
 	if a.otelShutdown != nil {
 		// ctx is already canceled by now; keep its values, drop the

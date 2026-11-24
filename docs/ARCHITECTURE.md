@@ -154,6 +154,36 @@ all at once.
 dispatcher (it needs the same SSRF-guarded client and signing secrets); the API never makes
 outbound calls to customer URLs.
 
+## The live layer
+
+**The dashboard only observes.** Every number on screen is a count of something that happened in
+the real pipeline; nothing is simulated in the browser.
+
+- **Producers pre-aggregate.** Ingest and the dispatcher record activity in-process (a mutex and a
+  few increments) and publish one batch per tenant per 100ms to Redis. They record *after* commit,
+  so nothing, not even a dashboard update, sits between a subscriber's `200` and the ack. Publishing
+  runs on its own goroutine with a bounded outbox: when Redis is slow or down, batches are dropped
+  and the dashboard goes stale. Deliveries never wait.
+- **Sampling is bounded and biased toward failures.** Counts are exact; individual events (for the
+  feed and the canvas particles) are reservoir-sampled, except failures, which are always admitted
+  up to a cap. A 0.5% failure rate still shows up on screen.
+- **The hub merges, frames and reconciles.** It folds batches from every replica into one 10Hz
+  frame per watched tenant, and once a second reads depth, circuit state and DLQ size from
+  Postgres. Endpoint deltas are derived from `updated_at` revisions on that read, so a delta lost in
+  pub/sub (which has no backlog) is corrected within a second.
+- **Backpressure per connection.** A frame is a snapshot, so a newer one *replaces* an unsent older
+  one: a slow client sees fewer frames, never stale ones. Deltas queue in order and are never
+  dropped; a client whose delta queue overflows is disconnected and reconnects with full-jitter
+  backoff. The hub only ever does non-blocking offers, so one slow client cannot stall the others.
+- **Channels are filtered server-side.** A client watching one endpoint (`endpoint:<id>`) gets a
+  projected frame containing only that endpoint, never the firehose.
+
+**The demo drives the real system.** A runtime in the worker service (one leader, chosen by a
+Postgres advisory lock) generates traffic through the real ingest transaction and scripts the
+receiver-sim sinks. Its narration quotes measured numbers ("ingest p99 9.4ms"), not canned ones.
+The public dashboard API is read-only; demo buttons are validated, clamped and rate-limited per IP,
+and in demo mode endpoints can only target the built-in sinks.
+
 ### Measured, not assumed
 
 Things the tests measured that changed the implementation:
@@ -177,6 +207,8 @@ Things the tests measured that changed the implementation:
 - **A probe must not wait for a delivery's backoff.** A half-open probe whose stream head was still
   backing off found nothing "due", released without probing, and left the breaker stuck until the
   probe timed out. Probes now take the first pending message regardless of due time.
+- **A first frame with no endpoints.** A new dashboard's first frame could beat the hub's first
+  Postgres snapshot and render an empty graph for 100ms. Frames now wait for the snapshot.
 - **Panics on errgroup goroutines.** `recover()` only catches panics on its own goroutine, so a
   `recover` around a drain loop never sees a panic in a concurrent delivery. One bad delivery would
   have crashed the whole dispatcher. The recover lives on the goroutine that runs the attempt.

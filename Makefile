@@ -89,6 +89,13 @@ migrate-status: ## List migrations and whether each is applied
 tenant: ## Create a tenant and print its API key (make tenant NAME=acme)
 	go run ./cmd/ithaca tenant create $(or $(NAME),dev)
 
+.PHONY: demo
+demo: build ## Run the full demo locally: seed, then every service in demo mode
+	go run ./cmd/ithaca migrate up
+	ITHACA_DEMO_MODE=true go run ./cmd/ithaca demo seed
+	ITHACA_DEMO_MODE=true ITHACA_RETRY_BASE=500ms ITHACA_RETRY_MAX_ATTEMPTS=6 \
+	ITHACA_BREAKER_COOLDOWN=3s ITHACA_BREAKER_MAX_COOLDOWN=10s ./scripts/dev.sh start
+
 .PHONY: redis-cli
 redis-cli: ## Open a redis shell
 	$(COMPOSE) exec redis redis-cli

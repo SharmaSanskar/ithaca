@@ -108,6 +108,8 @@ type AttemptRecord struct {
 // Result is the outcome of processing one message, ready to ack.
 type Result struct {
 	DeliveryID  uuid.UUID
+	EventID     uuid.UUID // for observers (the live feed); not persisted by Ack
+	EventType   string
 	Disposition Disposition
 	// Attempts is the delivery's attempt count AFTER this result.
 	Attempts   int32

@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -28,7 +29,13 @@ import (
 type ControlPlane struct {
 	store    *store.Store
 	replayer *dlq.Replayer
+	// urlPrefix, when set, is the only URL prefix endpoints may use.
+	urlPrefix string
 }
+
+// RestrictURLs limits new endpoints to URLs under prefix (the public demo's
+// built-in sinks).
+func (c *ControlPlane) RestrictURLs(prefix string) { c.urlPrefix = prefix }
 
 // NewControlPlane builds the handler set. replayRate is replayed deliveries
 // per second per endpoint.
@@ -102,6 +109,8 @@ func (c *ControlPlane) createEndpoint(w http.ResponseWriter, r *http.Request) {
 	details := map[string]string{}
 	if msg := validateEndpointURL(req.URL); msg != "" {
 		details["url"] = msg
+	} else if c.urlPrefix != "" && !strings.HasPrefix(req.URL, c.urlPrefix) {
+		details["url"] = "this is a public demo: endpoints must point at a built-in sink (" + c.urlPrefix + "<id>)"
 	}
 	if len(req.Description) > 500 {
 		details["description"] = "must be at most 500 characters"

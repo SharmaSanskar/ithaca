@@ -54,6 +54,8 @@ func run(args []string) error {
 		return runMigrate(args[2:])
 	case "tenant":
 		return runTenant(args[2:])
+	case "demo":
+		return runDemo(args[2:])
 	default:
 		svc, ok := config.ParseService(cmd)
 		if !ok {
@@ -96,6 +98,7 @@ services:
 other:
   migrate [up|status]    apply or list database migrations
   tenant create <name>   create a tenant and print its API key
+  demo seed              create the demo tenant and its sink endpoints
   version                print build information
   help                   print this message
 

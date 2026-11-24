@@ -1,19 +1,24 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 
 	"github.com/SharmaSanskar/ithaca/internal/api"
 	"github.com/SharmaSanskar/ithaca/internal/auth"
 	"github.com/SharmaSanskar/ithaca/internal/breaker"
 	"github.com/SharmaSanskar/ithaca/internal/deliver"
+	"github.com/SharmaSanskar/ithaca/internal/demo"
 	"github.com/SharmaSanskar/ithaca/internal/ingest"
 	"github.com/SharmaSanskar/ithaca/internal/janitor"
+	"github.com/SharmaSanskar/ithaca/internal/live"
 	"github.com/SharmaSanskar/ithaca/internal/platform/clock"
 	"github.com/SharmaSanskar/ithaca/internal/platform/config"
 	"github.com/SharmaSanskar/ithaca/internal/platform/httpx"
@@ -68,6 +73,9 @@ func (a *app) wireIngest() error {
 		return err
 	}
 	svc := ingest.NewService(a.store, ingest.NewMetrics(a.metrics.Registerer()))
+	if pub := a.livePublisher(); pub != nil {
+		svc.SetObserver(live.IngestObserver{P: pub})
+	}
 	authn := auth.NewAuthenticator(a.store, apiKeyCacheTTL)
 
 	return a.addPublicListener("ingest", func(r chi.Router) {
@@ -136,6 +144,9 @@ func (a *app) wireDispatcher() error {
 	// Registration order matters for shutdown: components stop in REVERSE
 	// order, and only the pool has a Stop. The reaper and stats loop keep
 	// running until the pool has drained.
+	if pub := a.livePublisher(); pub != nil {
+		pool.SetObserver(live.DispatchObserver{P: pub})
+	}
 	a.runner.Add(shutdown.Component{Name: "pool", Run: pool.Run, Stop: pool.Shutdown})
 	a.runner.Add(shutdown.Component{Name: "reaper", Run: (&worker.Reaper{
 		Q: q, Every: d.ReapEvery, Log: a.log.With("component", "reaper"), M: m,
@@ -171,6 +182,22 @@ func (a *app) wireAPI() error {
 	}
 	authn := auth.NewAuthenticator(a.store, apiKeyCacheTTL)
 	cp := api.NewControlPlane(a.store, float64(a.cfg.Delivery.ReplayRate))
+	if a.cfg.Demo.Enabled {
+		// On the public demo, endpoints can only point at the built-in
+		// sinks: the live URL cannot be used to send traffic anywhere else.
+		cp.RestrictURLs(a.cfg.Demo.SinkBaseURL + "/sink/")
+	}
+
+	var dash *api.Dashboard
+	var controls *api.DemoControls
+	if a.cfg.Demo.Enabled {
+		rdb, err := a.openRedis(true)
+		if err != nil {
+			return err
+		}
+		dash = api.NewDashboard(a.store, cp)
+		controls = &api.DemoControls{Redis: rdb, PerMinute: a.cfg.Demo.ActionsPerMinute}
+	}
 
 	return a.addPublicListener("api", func(r chi.Router) {
 		r.Route("/api/v1", func(r chi.Router) {
@@ -178,12 +205,17 @@ func (a *app) wireAPI() error {
 			r.Use(httpx.MaxBodyBytes(1 << 20))
 			r.Get("/", serviceInfo(config.ServiceAPI))
 
-			// Tenant-scoped management API, authenticated by API key. The
-			// dashboard's public read-only API arrives in Phase 4.
+			// Tenant-scoped management API, authenticated by API key.
 			r.Group(func(r chi.Router) {
 				r.Use(authn.Middleware)
 				cp.Routes(r)
 			})
+
+			// The public, read-only dashboard API and the demo's buttons.
+			if dash != nil {
+				dash.Routes(r, controls.RateLimit)
+				controls.Routes(r)
+			}
 		})
 
 		// The SPA is mounted last and catches everything else, so client-side
@@ -199,9 +231,38 @@ func (a *app) wireAPI() error {
 // socket), and it scales on connection count rather than CPU. Co-locating it
 // would mean every control-plane deploy kills every dashboard.
 func (a *app) wireWS() error {
+	if err := a.openStore(); err != nil {
+		return err
+	}
+	rdb, err := a.openRedis(true)
+	if err != nil {
+		return err
+	}
+	hub := live.NewHub(live.PGSnapshotter{Store: a.store}, a.log.With("component", "hub"), a.metrics.Registerer())
+	bus := live.NewRedisBus(rdb)
+	a.runner.Add(shutdown.Component{Name: "hub", Run: func(ctx context.Context) error {
+		return hub.Run(ctx, bus.Subscribe(ctx))
+	}})
+
+	// The public dashboard watches the demo tenant. Resolved lazily (and
+	// cached) so the hub can start before the demo is seeded.
+	var tenant atomic.Pointer[uuid.UUID]
+	resolve := func(r *http.Request) (uuid.UUID, bool) {
+		if t := tenant.Load(); t != nil {
+			return *t, true
+		}
+		t, err := demo.TenantID(r.Context(), a.store)
+		if err != nil {
+			return uuid.Nil, false
+		}
+		tenant.Store(&t)
+		return t, true
+	}
+	h := &live.Handler{Hub: hub, Resolve: resolve, AllowedOrigins: a.cfg.WS.AllowedOrigins, MaxConns: int64(a.cfg.WS.MaxConns)}
+
 	return a.addPublicListener("ws", func(r chi.Router) {
 		r.Get("/", serviceInfo(config.ServiceWS))
-		r.Get("/ws", notImplemented("live event feed", "Phase 4"))
+		r.Get("/ws", h.ServeHTTP)
 	})
 }
 
@@ -215,7 +276,26 @@ func (a *app) wireWorker() error {
 		return err
 	}
 	j := janitor.New(a.store, a.log.With("component", "janitor"), a.metrics.Registerer())
+	j.Retention = a.cfg.Demo.Retention
 	a.runner.Add(shutdown.Component{Name: "janitor", Run: j.Run})
+
+	if a.cfg.Demo.Enabled {
+		rdb, err := a.openRedis(true)
+		if err != nil {
+			return err
+		}
+		pub := a.livePublisher()
+		svc := ingest.NewService(a.store, nil)
+		if pub != nil {
+			svc.SetObserver(live.IngestObserver{P: pub})
+		}
+		rt := &demo.Runtime{
+			Store: a.store, Redis: rdb, Publisher: pub, Ingest: svc,
+			SinkBaseURL: a.cfg.Demo.SinkBaseURL, AmbientRate: a.cfg.Demo.AmbientRate,
+			ReplayRate: a.cfg.Delivery.ReplayRate, Log: a.log.With("component", "demo"),
+		}
+		a.runner.Add(shutdown.Component{Name: "demo", Run: rt.Run})
+	}
 	return nil
 }
 

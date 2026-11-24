@@ -155,6 +155,15 @@ jobs:
           --health-interval 2s
           --health-timeout 3s
           --health-retries 20
+      # The live dashboard feed (ws hub, demo runtime) runs on Redis pub/sub.
+      redis:
+        image: redis:8-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
     steps:
       - uses: actions/checkout@v4
 
@@ -167,6 +176,7 @@ jobs:
         run: go test -race -count=1 -tags=integration -timeout=10m ./...
         env:
           ITHACA_TEST_DATABASE_URL: postgres://ithaca:ithaca@localhost:5432/postgres?sslmode=disable
+          ITHACA_TEST_REDIS_URL: redis://localhost:6379/0
 
   # sqlc output is committed. If someone edits a query or a migration and
   # forgets to regenerate, this fails rather than letting Go and SQL drift.

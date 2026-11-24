@@ -75,6 +75,8 @@ type Config struct {
 	Telemetry Telemetry
 	Dispatch  Dispatch
 	Delivery  Delivery
+	Demo      Demo
+	WS        WS
 
 	// ShutdownGrace is how long in-flight work gets to finish after SIGTERM.
 	// Kubernetes terminationGracePeriodSeconds MUST be larger than this
@@ -171,6 +173,30 @@ type Delivery struct {
 	ReplayRate int
 }
 
+// Demo configures the public demo: the seeded tenant, its sinks, ambient
+// traffic, and the guard rails on its public controls.
+type Demo struct {
+	// Enabled turns on the demo runtime (worker), the public dashboard API
+	// and demo controls (api), and restricts endpoint URLs to the sinks.
+	Enabled     bool
+	SinkBaseURL string // where receiver-sim is reachable from the dispatcher
+	AmbientRate int    // events/s when no scenario is running
+	// ActionsPerMinute is the per-IP limit on demo buttons.
+	ActionsPerMinute int
+	// Retention deletes delivery history, attempts and events older than
+	// this (0 = keep everything). The always-on demo needs it; a real
+	// deployment would use time partitions instead.
+	Retention time.Duration
+}
+
+// WS configures the WebSocket hub.
+type WS struct {
+	// AllowedOrigins are accepted in addition to same-origin (e.g. the Vite
+	// dev server).
+	AllowedOrigins []string
+	MaxConns       int
+}
+
 // Telemetry configures OTel export.
 type Telemetry struct {
 	Enabled      bool
@@ -242,7 +268,26 @@ func Load(svc Service) (*Config, error) {
 
 			ReplayRate: l.int("ITHACA_REPLAY_RATE", 50),
 		},
+		Demo: Demo{
+			Enabled:          l.bool("ITHACA_DEMO_MODE", false),
+			SinkBaseURL:      strings.TrimRight(l.str("ITHACA_DEMO_SINK_URL", "http://localhost:8090"), "/"),
+			AmbientRate:      l.int("ITHACA_DEMO_AMBIENT_RATE", 5),
+			ActionsPerMinute: l.int("ITHACA_DEMO_ACTIONS_PER_MINUTE", 30),
+			Retention:        l.dur("ITHACA_RETENTION", 0),
+		},
+		WS: WS{
+			MaxConns: l.int("ITHACA_WS_MAX_CONNS", 2000),
+		},
 		ShutdownGrace: l.dur("ITHACA_SHUTDOWN_GRACE", 30*time.Second),
+	}
+	defOrigins := ""
+	if cfg.Env == "dev" {
+		defOrigins = "http://localhost:5173,http://localhost:8080"
+	}
+	for _, o := range strings.Split(l.str("ITHACA_WS_ALLOWED_ORIGINS", defOrigins), ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			cfg.WS.AllowedOrigins = append(cfg.WS.AllowedOrigins, o)
+		}
 	}
 
 	// Loopback is allowed by default in dev only, so a local receiver works.

@@ -21,20 +21,20 @@ the product cannot exist without one.
 
 ## Status
 
-**Phase 3 — DLQ, circuit breaker, endpoint verification.** Dead letters can be browsed and
-replayed (idempotently, rate-ramped). An ordered stream whose head dies pauses instead of skipping,
-and replaying the head restores the exact original order. A dead endpoint trips a Postgres-backed
-circuit breaker that parks its streams and lets exactly one probe through per cooldown. New
-endpoints receive nothing until they echo a signed challenge.
+**Phase 4 — The live layer.** Ingest and the dispatcher stream what they do (post-commit, never
+blocking) through Redis to a WebSocket hub, which sends every dashboard a 10Hz frame of exact
+counts plus lossless entity deltas reconciled from Postgres. A self-running demo drives the real
+system through five narrated scenarios: happy path, endpoint down, slow consumer, bad deploy, and
+recovery with replay.
 
 | Phase | | |
 |---|---|---|
 | 0 | Foundation: skeleton, containers, CI, design system | done |
 | 1 | Data model + ingest | done |
 | 2 | Queue, bounded worker pool, delivery | done |
-| 3 | DLQ replay, circuit breaker, endpoint verification | **done** |
-| 4 | Live layer: WebSocket hub + demo scenario engine | next |
-| 5 | Dashboard | |
+| 3 | DLQ replay, circuit breaker, endpoint verification | done |
+| 4 | Live layer: WebSocket hub + demo scenario engine | **done** |
+| 5 | Dashboard | next |
 | 6 | Benchmarks + Grafana dashboards | |
 | 7 | Ship: public demo + write-up | |
 | 8 | Kubernetes (k3d + Kustomize) | |
@@ -62,6 +62,14 @@ curl -i localhost:8081/v1/events \
 
 Endpoints and subscriptions are managed at `localhost:8080/api/v1/{endpoints,subscriptions}` with
 the same key.
+
+Or run the whole self-driving demo:
+
+```bash
+make up && make demo            # seed the demo tenant, start everything in demo mode
+curl -X POST localhost:8080/api/v1/demo/scenarios/endpoint_down
+# live feed: ws://localhost:8082/ws  →  {"op":"subscribe","ch":"flow"} and {"op":"subscribe","ch":"demo"}
+```
 
 | | |
 |---|---|
@@ -180,6 +188,8 @@ internal/
   breaker/           circuit-breaker state machine (a pure function)
   dlq/               dead-letter replay
   verify/            endpoint verification handshake
+  live/              live feed: publisher, Redis bus, WebSocket hub
+  demo/              the self-running demo: seed, traffic, narrated scenarios
   receiver/          programmable subscriber for tests and the receiver-sim
   web/               the dashboard, compiled in with embed.FS
 web/                 dashboard source (Vite + React 19 + Tailwind v4)

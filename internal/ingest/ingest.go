@@ -58,12 +58,22 @@ type Accepted struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// Observer is told about every event accepted, AFTER its transaction
+// commits. It must not block (the live publisher only increments counters).
+type Observer interface {
+	Ingested(tenant, eventID uuid.UUID, eventType string)
+}
+
 // Service runs the ingest transaction.
 type Service struct {
-	store   *store.Store
-	metrics *Metrics
-	now     func() time.Time
+	store    *store.Store
+	metrics  *Metrics
+	now      func() time.Time
+	observer Observer
 }
+
+// SetObserver installs a post-commit observer (the live dashboard feed).
+func (s *Service) SetObserver(o Observer) { s.observer = o }
 
 // NewService builds the ingest service. metrics may be nil in tests.
 func NewService(s *store.Store, m *Metrics) *Service {
@@ -165,6 +175,9 @@ func (s *Service) Ingest(ctx context.Context, req Request) (Result, error) {
 		}
 
 		s.count("accepted")
+		if s.observer != nil {
+			s.observer.Ingested(req.TenantID, eventID, env.Type)
+		}
 		if s.metrics != nil {
 			s.metrics.Deliveries.Add(float64(deliveries))
 			s.metrics.Fanout.Observe(float64(deliveries))

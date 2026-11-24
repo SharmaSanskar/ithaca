@@ -112,7 +112,7 @@ func (e *HTTPExecutor) Execute(ctx context.Context, l *queue.Lease, m queue.Mess
 		ErrorDetail: errString(resp.Err),
 		TraceID:     traceID(span),
 	}
-	r := queue.Result{DeliveryID: m.DeliveryID, Record: rec, LastError: describe(resp)}
+	r := queue.Result{DeliveryID: m.DeliveryID, EventID: m.EventID, EventType: m.EventType, Record: rec, LastError: describe(resp)}
 
 	switch resp.Outcome {
 	case deliver.Success:
