@@ -11,6 +11,8 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -223,6 +225,45 @@ func TestDeliverSendsExactBytesAndValidHeaders(t *testing.T) {
 	}
 	if !Verify(r.Secret, h.Get("Ithaca-Signature"), h.Get("Ithaca-Id"), h.Get("Ithaca-Timestamp"), gotBody, time.Now(), DefaultTolerance) {
 		t.Error("the signature on the wire does not verify against the bytes on the wire")
+	}
+}
+
+// A busy endpoint receives many requests at once, round after round. Every
+// connection opened in the first round must be reused afterwards; a per-host
+// idle cap below the concurrency closes the excess after each request, and a
+// sustained drain then dials once per delivery until the ephemeral ports run
+// out (bench E2).
+func TestConcurrentDeliveriesToOneHostReuseConnections(t *testing.T) {
+	const concurrency, rounds = 64, 5
+	var dialed atomic.Int64
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, hr *http.Request) {
+		_, _ = io.Copy(io.Discard, hr.Body)
+		time.Sleep(20 * time.Millisecond) // all requests in a round overlap
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		if s == http.StateNew {
+			dialed.Add(1)
+		}
+	}
+	srv.Start()
+	defer srv.Close()
+
+	c := NewClient(loopback())
+	for range rounds {
+		var wg sync.WaitGroup
+		for range concurrency {
+			wg.Go(func() {
+				if resp := c.Deliver(context.Background(), req(srv.URL)); resp.Outcome != Success {
+					t.Errorf("outcome = %s (%v)", resp.Outcome, resp.Err)
+				}
+			})
+		}
+		wg.Wait()
+	}
+	if n := dialed.Load(); n > concurrency {
+		t.Errorf("%d connections dialed for %d rounds of %d concurrent requests; want at most %d (one per concurrent request, reused every round)",
+			n, rounds, concurrency, concurrency)
 	}
 }
 

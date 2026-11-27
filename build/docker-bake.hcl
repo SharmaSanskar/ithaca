@@ -54,9 +54,12 @@ target "ithaca-local" {
 target "ithaca-release" {
   inherits   = ["_common"]
   platforms  = ["linux/amd64", "linux/arm64"]
+  # Only release tags (v*) build this target, so `latest` always means the
+  # newest release, never a branch build.
   tags = [
     "${REGISTRY}/${IMAGE}:${VERSION}",
     "${REGISTRY}/${IMAGE}:${COMMIT}",
+    "${REGISTRY}/${IMAGE}:latest",
   ]
   cache-from = ["type=registry,ref=${REGISTRY}/${IMAGE}:buildcache"]
   cache-to   = ["type=registry,ref=${REGISTRY}/${IMAGE}:buildcache,mode=max"]

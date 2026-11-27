@@ -1,0 +1,24 @@
+# KEDA scales the dispatchers on the queue itself. Needs the KEDA operator
+# (installed by `make k8s-up`).
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - scaledobject.yaml
+  - networkpolicy.yaml
+configurations:
+  - nameref.yaml # teach kustomize that TriggerAuthentication names a Secret
+configMapGenerator:
+  - name: ithaca-config
+    behavior: merge
+    literals:
+      # The scaler's query assumes exactly this many workers per pod (it
+      # divides runnable streams by it). Change both together.
+      - ITHACA_DISPATCH_WORKERS=32
+patches:
+  # The HPA that KEDA creates owns the replica count. Leaving `replicas` in
+  # the manifest would make every `kubectl apply` reset the dispatchers to 2
+  # in the middle of a scale-out.
+  - target: { kind: Deployment, name: dispatcher }
+    patch: |-
+      - op: remove
+        path: /spec/replicas

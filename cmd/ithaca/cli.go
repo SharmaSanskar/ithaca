@@ -51,8 +51,8 @@ func runMigrate(args []string) error {
 // runTenant: `ithaca tenant create <name>` — prints the tenant id and its API
 // key. The key is shown exactly once; only its SHA-256 is stored.
 func runTenant(args []string) error {
-	if len(args) < 2 || args[0] != "create" {
-		return errors.New("usage: ithaca tenant create <name>")
+	if len(args) < 2 || (args[0] != "create" && args[0] != "key") {
+		return errors.New("usage: ithaca tenant create <name> | ithaca tenant key <name>")
 	}
 	name := strings.Join(args[1:], " ")
 
@@ -69,7 +69,13 @@ func runTenant(args []string) error {
 	}
 	defer s.Close()
 
-	p, err := auth.ProvisionTenant(ctx, s, name)
+	provision := auth.ProvisionTenant
+	if args[0] == "key" {
+		provision = func(ctx context.Context, s *store.Store, name string) (auth.Provisioned, error) {
+			return auth.IssueKey(ctx, s, name, "cli-"+time.Now().UTC().Format("20060102-150405"))
+		}
+	}
+	p, err := provision(ctx, s, name)
 	if err != nil {
 		return err
 	}

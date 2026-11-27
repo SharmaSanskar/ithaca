@@ -1,0 +1,72 @@
+# Scale the dispatchers on WORKER DEMAND: streams that need a worker right
+# now, whether one is delivering them (leased) or they are waiting for one
+# (ready and due). One worker holds one stream, so
+#
+#     pods = ceil( (leased streams + ready, due streams) / 32 )
+#
+# where 32 is ITHACA_DISPATCH_WORKERS. This is a utilization signal in the
+# currency that actually limits throughput (worker slots), which CPU is not:
+# a dispatcher waiting on 32 slow subscribers is "idle" at 3% CPU.
+#
+# What it deliberately does NOT count:
+#   - streams parked behind an open circuit, paused on a dead head, or
+#     waiting out a retry backoff: they need no worker until they are due, and
+#     scaling up into an endpoint outage is the classic autoscaler mistake.
+#   - deliveries: 100k deliveries on ONE ordered key are one stream, one
+#     worker, one pod. Raw queue depth would ask for 50.
+#
+# The first version scaled on due-delivery COUNT instead, and oscillated under
+# sustained load: once the pods caught up, the queue was short, the metric said
+# "1 pod", and it scaled 9 → 3 mid-burst while the backlog regrew to 6.4k.
+# Backlog measures work waiting; this measures work, waiting or in flight.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: dispatcher
+spec:
+  scaleTargetRef: { name: dispatcher }
+  minReplicaCount: 2 # availability, and the PDB's maxUnavailable: 1 needs 2
+  maxReplicaCount: 20
+  # No pollingInterval: with minReplicaCount > 0 the HPA pulls this metric
+  # from KEDA on its own 15 s sync, which is what sets scale-up latency.
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          # A burst should be met now: no stabilization, up to +6 pods or
+          # +100% every 15 s, whichever is more.
+          stabilizationWindowSeconds: 0
+          selectPolicy: Max
+          policies:
+            - { type: Pods, value: 6, periodSeconds: 15 }
+            - { type: Percent, value: 100, periodSeconds: 15 }
+        scaleDown:
+          # Down slowly, so a drained-but-still-trickling queue does not
+          # flap: the recommendation must hold for 60 s, then at most half
+          # the pods go per 30 s.
+          stabilizationWindowSeconds: 60
+          policies:
+            - { type: Percent, value: 50, periodSeconds: 30 }
+  triggers:
+    - type: postgresql
+      metricType: AverageValue
+      authenticationRef: { name: ithaca-postgres }
+      metadata:
+        # AverageValue with target 1: the query already returns pods.
+        targetQueryValue: "1"
+        activationTargetQueryValue: "0"
+        # Reads delivery_streams only (one row per stream, not per delivery),
+        # so its cost does not grow with the backlog.
+        query: >-
+          SELECT CEIL(count(*) / 32.0) FROM delivery_streams
+          WHERE state = 'leased' OR (state = 'ready' AND next_visible_at <= now())
+---
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: ithaca-postgres
+spec:
+  secretTargetRef:
+    - parameter: connection
+      name: ithaca-secrets
+      key: ITHACA_DATABASE_URL

@@ -1,0 +1,20 @@
+# How the cluster's Prometheus and Grafana see Ithaca. Applied after the
+# kube-prometheus-stack chart, which provides the CRDs used here.
+#
+# The dashboard and the alert rules are NOT copies: the dashboard JSON is the
+# file Grafana loads in compose, and prometheusrule.yaml is generated from the
+# compose rules by `make dashboards`. (Building this needs
+# --load-restrictor LoadRestrictionsNone for the dashboard file.)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: monitoring
+resources:
+  - servicemonitor.yaml
+  - prometheusrule.yaml
+configMapGenerator:
+  - name: ithaca-dashboard
+    files:
+      - ithaca.json=../../compose/grafana/provisioning/dashboards/json/ithaca.json
+    options:
+      labels: { grafana_dashboard: "1" }
+      disableNameSuffixHash: true

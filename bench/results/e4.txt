@@ -1,0 +1,30 @@
+════════════════════════════════════════════════════════════════════
+E4 · does a 30%-failing endpoint hurt a healthy one?
+────────────────────────────────────────────────────────────────────
+machine: Apple M4, 10 cores, 16 GB
+docker:  10 CPUs, 7.7 GB
+commit:  7228e44-dirty  go: go1.26.5  k6: grafana/k6:2.4.0
+postgres: 17, fsync=on, synchronous_commit=on (ack path uses synchronous_commit=off per transaction, by design)
+
+[2m13:56:43[0m fresh database
+[2m13:56:44[0m endpoints verified: healthy=enabled flaky=enabled
+── baseline: 200 events/s × 70 s (first 10 s excluded), fanout 2, receivers 20 ms, retry base 1 s
+ endpoint |   n   | qw_p50 | qw_p99 | del_p50 | del_p99 | e2e_p50 | e2e_p95 | e2e_p99 | e2e_max 
+----------+-------+--------+--------+---------+---------+---------+---------+---------+---------
+ flaky    | 12032 |   16.3 |   32.7 |    21.0 |    22.0 |    37.3 |    50.8 |    54.0 |    79.3
+ healthy  | 12032 |   16.2 |   32.5 |    21.0 |    22.0 |    37.0 |    50.5 |    53.8 |    86.0
+          | 24064 |   16.3 |   32.6 |    21.0 |    22.0 |    37.2 |    50.7 |    53.9 |    86.0
+
+attempts per delivered event, flaky endpoint: 1.000
+
+[2m13:57:55[0m fresh database
+[2m13:57:56[0m endpoints verified: flaky=enabled healthy=enabled
+── neighbor: 200 events/s × 70 s (first 10 s excluded), fanout 2, receivers 20 ms, retry base 1 s, flaky endpoint fails 30% with 503
+ endpoint |   n   | qw_p50 | qw_p99 | del_p50 | del_p99 | e2e_p50 | e2e_p95 | e2e_p99 | e2e_max 
+----------+-------+--------+--------+---------+---------+---------+---------+---------+---------
+ flaky    | 12031 |   16.2 |   33.4 |    21.0 |    23.0 |    43.4 |  2295.5 |  5725.9 | 64470.7
+ healthy  | 12032 |   15.7 |   32.1 |    21.0 |    23.0 |    36.6 |    50.1 |    53.4 |    71.9
+          | 24063 |   16.0 |   32.9 |    21.0 |    23.0 |    39.4 |  1045.5 |  3849.1 | 64470.7
+
+attempts per delivered event, flaky endpoint: 1.429
+

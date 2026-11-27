@@ -163,19 +163,36 @@ WHERE d.id = r.id AND d.stream_id = @stream_id;
 -- Fenced by lock_token, so a worker that lost its lease cannot release a
 -- stream someone else now holds.
 --
--- Race with ingest: an enqueue onto this stream either commits before this
--- statement (and is counted below) or blocks on this row and then sees
--- 'idle'/'ready' and makes it ready itself. No wakeup is ever lost.
+-- Race with ingest (and DLQ replay): an enqueue onto a LEASED stream leaves it
+-- leased and relies on this statement to notice the new delivery. If the
+-- enqueue commits after this statement's snapshot, Postgres re-checks the
+-- target row at its LATEST version (EvalPlanQual), but the "anything pending?"
+-- subquery h keeps the OLD snapshot and cannot see the delivery. Counting
+-- alone would park a stream with work in it as 'idle', forever.
+--
+-- So h also reads, as of the snapshot, the two columns every enqueue path
+-- changes: next_seq (ingest, and a replay appended at the tail) and
+-- paused_delivery_id (a replay that resumes a paused head). ds.* is the
+-- latest version (the SET expressions below are evaluated on it; the FROM
+-- subquery is not re-run): if either differs, a delivery we cannot see has
+-- landed, and
+-- we must not conclude the stream is empty. Release it ready and visible now;
+-- a worker that then finds nothing releases it idle properly.
+-- (Bench E5 lost 1–2 deliveries in 45,006 to this before the fix;
+-- TestEnqueueRacingTheFinalReleaseIsNotLost reproduces it deterministically.)
 UPDATE delivery_streams ds
 SET state           = CASE
                         WHEN ds.paused_delivery_id IS NOT NULL THEN 'paused'
-                        WHEN h.t IS NULL THEN 'idle'
+                        WHEN h.t IS NULL AND ds.next_seq = h.seen_next_seq AND h.seen_paused IS NULL THEN 'idle'
                         WHEN e.circuit_state = 'open'
                           OR (e.circuit_state = 'half_open' AND e.circuit_probe_stream_id IS DISTINCT FROM ds.id)
                           THEN 'circuit_open'
                         ELSE 'ready'
                       END,
-    next_visible_at = GREATEST(COALESCE(h.t, now()), now() + interval '1 millisecond' * @not_before_ms::bigint),
+    next_visible_at = GREATEST(CASE WHEN ds.next_seq = h.seen_next_seq AND ds.paused_delivery_id IS NOT DISTINCT FROM h.seen_paused
+                                    THEN COALESCE(h.t, now())
+                                    ELSE now() END,
+                               now() + interval '1 millisecond' * @not_before_ms::bigint),
     locked_by       = NULL,
     lock_token      = NULL,
     locked_until    = NULL
@@ -183,7 +200,9 @@ FROM (
     SELECT CASE WHEN @ordered::bool
                 THEN (SELECT d.next_attempt_at FROM deliveries d WHERE d.stream_id = @id ORDER BY d.seq LIMIT 1)
                 ELSE (SELECT min(d.next_attempt_at) FROM deliveries d WHERE d.stream_id = @id)
-           END AS t
+           END AS t,
+           seen.next_seq AS seen_next_seq, seen.paused_delivery_id AS seen_paused
+    FROM delivery_streams seen WHERE seen.id = @id
 ) h, endpoints e
 WHERE ds.id = @id AND ds.lock_token = @lock_token AND ds.state = 'leased' AND e.id = ds.endpoint_id;
 

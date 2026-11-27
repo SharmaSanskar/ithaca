@@ -1,0 +1,105 @@
+# Zero trust inside the namespace: everything is denied, then each flow the
+# system actually has is allowed by name. The graph, in full:
+#
+#   ingress controller ─▶ api, ingest, ws (public ports)
+#   monitoring         ─▶ every admin port (metrics, probes are node-local)
+#   db clients         ─▶ postgres, redis (allowed by the deps' own policy)
+#   dispatcher         ─▶ the public internet on 80/443, and receiver-sim
+#   worker             ─▶ receiver-sim (the demo engine sets sink behavior)
+#
+# The dispatcher rule is the SSRF guard enforced a second time, at the network
+# layer: even if the application's dial-time check were bypassed, a webhook
+# aimed at 10.x, 172.16/12, 192.168/16, link-local (cloud metadata at
+# 169.254.169.254) or CGNAT space has no route out of the pod.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: default-deny }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: allow-dns }
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }
+          podSelector: { matchLabels: { k8s-app: kube-dns } }
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: allow-ingress-controller }
+spec:
+  podSelector:
+    matchExpressions:
+      - { key: app.kubernetes.io/name, operator: In, values: [api, ingest, ws] }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }
+          podSelector: { matchLabels: { app.kubernetes.io/name: traefik } }
+      ports:
+        - { port: http }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: allow-monitoring }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: monitoring } }
+      ports:
+        - { port: admin }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: dispatcher-egress }
+spec:
+  podSelector: { matchLabels: { ithaca.dev/egress: webhooks } }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 100.64.0.0/10, 127.0.0.0/8]
+      ports:
+        - { protocol: TCP, port: 80 }
+        - { protocol: TCP, port: 443 }
+    - to:
+        - podSelector: { matchLabels: { app.kubernetes.io/name: receiver-sim } }
+      ports:
+        - { port: 8090 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: worker-egress }
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/name: worker } }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector: { matchLabels: { app.kubernetes.io/name: receiver-sim } }
+      ports:
+        - { port: 8090 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: receiver-sim-ingress }
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/name: receiver-sim } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - { key: app.kubernetes.io/name, operator: In, values: [dispatcher, worker] }
+      ports:
+        - { port: 8090 }

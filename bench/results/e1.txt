@@ -1,0 +1,21 @@
+════════════════════════════════════════════════════════════════════
+E1 · ingest ceiling (stepped open-model load, dispatcher off)
+────────────────────────────────────────────────────────────────────
+machine: Apple M4, 10 cores, 16 GB
+docker:  10 CPUs, 7.7 GB
+commit:  7228e44-dirty  go: go1.26.5  k6: grafana/k6:2.4.0
+postgres: 17, fsync=on, synchronous_commit=on (ack path uses synchronous_commit=off per transaction, by design)
+
+[2m20:40:57[0m fresh database
+[2m20:40:58[0m endpoints verified: a=enabled
+config: 1 subscription (fanout 1), payload ~120 B, k6 in Docker → host ingest, 20 s per step
+ target/s  achieved/s     ok%  dropped   p50 ms   p95 ms   p99 ms
+      250         250  100.00        0     1.89     3.14     6.55
+      500         500  100.00        0     1.26     2.40     4.00
+     1000        1000  100.00        0     1.05     3.94    73.66
+     2000        2000  100.00        0     2.90    20.84    91.32
+     3000        3000  100.00        0     8.43   547.50   603.54
+     4000        2547  100.00        0  1450.30  2305.13  2490.39
+     6000        1821  100.00        0  1996.08  2862.76  3086.13
+
+ceiling (highest step with ≥95% of target achieved, 100% accepted, p99 < 50 ms, nothing dropped): 500/s

@@ -76,6 +76,9 @@ func (e *HTTPExecutor) Execute(ctx context.Context, l *queue.Lease, m queue.Mess
 	defer span.End()
 
 	started := e.now()
+	if attempt == 1 {
+		e.m.QueueWait.Observe(started.Sub(m.EventCreatedAt).Seconds())
+	}
 	resp := e.send.Deliver(ctx, deliver.Request{
 		URL:         l.Endpoint.URL,
 		Timeout:     l.Endpoint.Timeout,

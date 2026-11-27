@@ -1,0 +1,7 @@
+# The Secret is generated, so its name carries a content hash. Kustomize
+# rewrites references to it in the kinds it knows; this adds KEDA's.
+nameReference:
+  - kind: Secret
+    fieldSpecs:
+      - kind: TriggerAuthentication
+        path: spec/secretTargetRef/name

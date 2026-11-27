@@ -56,6 +56,8 @@ func run(args []string) error {
 		return runTenant(args[2:])
 	case "demo":
 		return runDemo(args[2:])
+	case "probe":
+		return runProbe(args[2:])
 	default:
 		svc, ok := config.ParseService(cmd)
 		if !ok {
@@ -98,7 +100,9 @@ services:
 other:
   migrate [up|status]    apply or list database migrations
   tenant create <name>   create a tenant and print its API key
+  tenant key <name>      issue an additional API key for an existing tenant
   demo seed              create the demo tenant and its sink endpoints
+  probe <url>            exit 0 if the URL returns 2xx (container health checks)
   version                print build information
   help                   print this message
 

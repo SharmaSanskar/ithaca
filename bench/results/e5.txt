@@ -1,0 +1,26 @@
+════════════════════════════════════════════════════════════════════
+E5 · one endpoint down for 60 s, then recovered (default breaker: 10 failures, 30 s cooldown doubling)
+────────────────────────────────────────────────────────────────────
+machine: Apple M4, 10 cores, 16 GB
+docker:  10 CPUs, 7.7 GB
+commit:  7228e44-dirty  go: go1.26.5  k6: grafana/k6:2.4.0
+postgres: 17, fsync=on, synchronous_commit=on (ack path uses synchronous_commit=off per transaction, by design)
+
+[2m14:01:08[0m fresh database
+[2m14:01:09[0m endpoints verified: steady=enabled outage=enabled
+config: 150 events/s for 150 s, fanout 2. t=30s 'outage' answers 503 to everything; t=90s it recovers.
+[2m14:01:39[0m outage begins
+[2m14:02:39[0m outage ends
+ingest during each phase (k6, every request):
+   before: 100.00% accepted · p50 2.18 ms · p99 8.58 ms · 4501 requests
+   during: 100.00% accepted · p50 2.21 ms · p99 8.17 ms · 9001 requests
+    after: 100.00% accepted · p50 2.17 ms · p99 7.96 ms · 9001 requests
+'outage' backlog peak: 14516 deliveries (parked, not lost)
+circuit timeline (s since start): 0s closed → 30s open → 127s closed
+endpoint recovered at t=90s · circuit closed at t=127s (37 s: waiting for the next probe)
+bulk backlog (≥99%) drained by t=130s, 40 s after recovery
+fully drained (every last delivery): 0.13 s after load stopped
+./bench/run.sh: line 123: 64185 Terminated: 15          ( while :; do
+    echo -e "$(python3 -c "import time;print(round(time.time()-$t0,1))")\t$(q "SELECT count(*) FROM deliveries d JOIN endpoints e ON e.id=d.endpoint_id WHERE e.description='outage'")\t$(q "SELECT circuit_state FROM endpoints WHERE description='outage'")" >> "$depth"; sleep 0.5;
+done )
+dead-lettered: 0   delivered: 45006 of 45006

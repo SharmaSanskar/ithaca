@@ -22,6 +22,7 @@ type fakeQueue struct {
 	ready    []*fakeStream
 	byID     map[int64]*fakeStream
 	shortOne bool // return at most one lease per call, to exercise Release(n - len)
+	requeue  bool // a released stream with work left is leasable again (as in Postgres)
 
 	leaseMaxes  []int
 	maxInFlight int // most streams leased at once
@@ -121,6 +122,9 @@ func (f *fakeQueue) Release(_ context.Context, l *queue.Lease, notBefore time.Du
 	defer f.mu.Unlock()
 	f.releases[l.StreamID] = append(f.releases[l.StreamID], notBefore)
 	f.inFlight--
+	if s := f.byID[l.StreamID]; f.requeue && len(s.msgs) > 0 {
+		f.ready = append(f.ready, s)
+	}
 	return nil
 }
 

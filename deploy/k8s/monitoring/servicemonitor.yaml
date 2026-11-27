@@ -1,0 +1,19 @@
+# Scrape every Ithaca Service's admin port (/metrics). The NetworkPolicy
+# allow-monitoring admits exactly this namespace to those ports.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: ithaca
+spec:
+  namespaceSelector: { matchNames: [ithaca] }
+  selector:
+    matchLabels: { app.kubernetes.io/part-of: ithaca }
+  endpoints:
+    - port: admin
+      interval: 15s
+      relabelings:
+        # Match the compose scrape config: job="ithaca", one `service` label
+        # per process (the operator already sets `service` to the Service
+        # name). The alert rules select on exactly these labels.
+        - targetLabel: job
+          replacement: ithaca

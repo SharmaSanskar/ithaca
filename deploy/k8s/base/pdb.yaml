@@ -1,0 +1,30 @@
+# A node drain (or a cluster upgrade) may evict at most one pod of each
+# multi-replica service at a time. Without these, `kubectl drain` on a node
+# holding both API replicas takes the dashboard down.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: api }
+spec:
+  maxUnavailable: 1
+  selector: { matchLabels: { app.kubernetes.io/name: api } }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: ingest }
+spec:
+  maxUnavailable: 1
+  selector: { matchLabels: { app.kubernetes.io/name: ingest } }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: ws }
+spec:
+  maxUnavailable: 1
+  selector: { matchLabels: { app.kubernetes.io/name: ws } }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: dispatcher }
+spec:
+  maxUnavailable: 1
+  selector: { matchLabels: { app.kubernetes.io/name: dispatcher } }

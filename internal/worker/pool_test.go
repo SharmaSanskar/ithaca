@@ -392,3 +392,33 @@ func TestCancelingRunIsAnImmediateHardStop(t *testing.T) {
 		}
 	})
 }
+
+// E2 regression: with more workers than runnable streams, a released stream
+// that still has work must be picked up immediately, not after the
+// dispatcher's idle backoff (up to PollCeiling) expires.
+func TestReleasedStreamIsReLeasedWithoutWaitingForThePollCeiling(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		q := newFakeQueue()
+		q.requeue = true
+		q.add(false, 40) // ONE stream, many messages: needs several leases
+		cfg := testConfig(16)
+		cfg.DrainBatch, cfg.MaxDrainRounds = 4, 1 // 4 messages per lease
+		cfg.PollCeiling = 30 * time.Second        // an idle dispatcher would sleep long
+		// Each lease takes 300ms of delivery: long enough for an idle
+		// dispatcher's backoff to grow while the stream is out, as in E2.
+		p, _, _ := newTestPool(cfg, q, &fakeExec{fn: sleepThen(300 * time.Millisecond)})
+		stop := runPool(t, p)
+
+		start := time.Now()
+		for q.succeeded() < 40 {
+			time.Sleep(time.Millisecond)
+		}
+		took := time.Since(start)
+		stop()
+		// 10 leases × 300ms ≈ 3s. Waiting out a growing backoff between
+		// leases (doubling toward the 30s ceiling) takes far longer.
+		if took > 4*time.Second {
+			t.Errorf("draining one stream took %s; released streams are waiting for the poll backoff", took)
+		}
+	})
+}

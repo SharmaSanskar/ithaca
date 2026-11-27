@@ -36,3 +36,22 @@ func ProvisionTenant(ctx context.Context, s *store.Store, name string) (Provisio
 	})
 	return out, err
 }
+
+// IssueKey creates an additional API key for an existing tenant, looked up by
+// name. Keys are independent: issuing one never invalidates another, which is
+// what lets a client rotate (issue new, deploy it, then revoke old) with no
+// window in which neither works. Like ProvisionTenant, the plaintext key
+// exists only in the return value.
+func IssueKey(ctx context.Context, s *store.Store, tenantName, keyName string) (Provisioned, error) {
+	t, err := s.GetTenantByName(ctx, tenantName)
+	if err != nil {
+		return Provisioned{}, fmt.Errorf("tenant %q: %w", tenantName, err)
+	}
+	key, prefix, hash := NewKey()
+	if _, err := s.CreateAPIKey(ctx, gen.CreateAPIKeyParams{
+		ID: uuid.Must(uuid.NewV7()), TenantID: t.ID, KeyPrefix: prefix, KeyHash: hash[:], Name: keyName,
+	}); err != nil {
+		return Provisioned{}, fmt.Errorf("create api key: %w", err)
+	}
+	return Provisioned{TenantID: t.ID, APIKey: key}, nil
+}

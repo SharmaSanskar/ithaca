@@ -1,0 +1,12 @@
+# The KEDA operator runs the scaler query against Postgres.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: keda-to-postgres }
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/name: postgres } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: keda } }
+      ports:
+        - { port: 5432 }

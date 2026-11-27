@@ -1,0 +1,29 @@
+════════════════════════════════════════════════════════════════════
+E8 · chaos: kill -9 a dispatcher every 20 s under load, then check conservation and phantom acks
+────────────────────────────────────────────────────────────────────
+machine: Apple M4, 10 cores, 16 GB
+docker:  10 CPUs, 7.7 GB
+commit:  7228e44-dirty  go: go1.26.5  k6: grafana/k6:2.4.0
+postgres: 17, fsync=on, synchronous_commit=on (ack path uses synchronous_commit=off per transaction, by design)
+
+[2m14:03:41[0m fresh database
+[2m14:03:42[0m endpoints verified: healthy=enabled flaky=enabled
+config: 2 dispatchers × 32 workers, 100 events/s × 120 s, fanout 2 (healthy 10 ms; flaky 10 ms, 20% 503), retry base 1 s, 25 attempts, lease 30 s
+[2m14:04:02[0m kill -9 d2
+./bench/run.sh: line 184: 67437 Killed: 9               env "$@" "$BIN" "$svc" >> "$LOGS/$svc.log" 2>&1
+[2m14:04:24[0m kill -9 d1
+./bench/run.sh: line 184: 67435 Killed: 9               env "$@" "$BIN" "$svc" >> "$LOGS/$svc.log" 2>&1
+[2m14:04:46[0m kill -9 d2
+./bench/run.sh: line 184: 67694 Killed: 9               env "$@" "$BIN" "$svc" >> "$LOGS/$svc.log" 2>&1
+[2m14:05:08[0m kill -9 d1
+./bench/run.sh: line 184: 67935 Killed: 9               env "$@" "$BIN" "$svc" >> "$LOGS/$svc.log" 2>&1
+[2m14:05:30[0m kill -9 d2
+./bench/run.sh: line 184: 68181 Killed: 9               env "$@" "$BIN" "$svc" >> "$LOGS/$svc.log" 2>&1
+[2m14:05:43[0m load done; waiting for quiescence (orphaned leases expire after 30 s)
+kills: 5 · quiescent after load stopped: 35.91s
+events ingested: 12001 · expected deliveries (×2): 24002
+terminal: 24002 (succeeded 24002 + dead 0) · still pending: 0 · leases held: 0
+CONSERVATION: exact ✓ (ingested × fanout == delivered + dead-lettered, nothing pending)
+PHANTOM ACKS (marked succeeded, never received a 2xx): 0 ✓
+received 2xx but not recorded succeeded: 0
+duplicate 2xx deliveries at the receiver: 3 of 24002 (0.01%) — the at-least-once cost of the crashes

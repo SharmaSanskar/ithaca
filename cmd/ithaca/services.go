@@ -286,7 +286,11 @@ func (a *app) wireWorker() error {
 			return err
 		}
 		pub := a.livePublisher()
-		svc := ingest.NewService(a.store, nil)
+		// The demo engine ingests in-process, not through the gateway, so its
+		// events must be counted here or every "Ingest" panel reads 0 while
+		// deliveries flow. Same instruments, this process's registry; the
+		// dashboards sum across services.
+		svc := ingest.NewService(a.store, ingest.NewMetrics(a.metrics.Registerer()))
 		if pub != nil {
 			svc.SetObserver(live.IngestObserver{P: pub})
 		}
@@ -311,6 +315,9 @@ func (a *app) wireReceiverSim() error {
 	// No request log: this process may take millions of requests in a load
 	// test. Per-sink counters are kept instead (GET /sink/{id}/stats).
 	rcv := receiver.New(uint64(time.Now().UnixNano()), false) //nolint:gosec // seed only
+	if a.cfg.ReceiverTrackDeliveries {
+		rcv.TrackDeliveries()
+	}
 	return a.addPublicListener("receiver-sim", func(r chi.Router) {
 		r.Get("/", serviceInfo(config.ServiceReceiverSim))
 		rcv.Mount(r)

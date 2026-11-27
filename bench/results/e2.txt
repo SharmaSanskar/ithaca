@@ -1,0 +1,41 @@
+════════════════════════════════════════════════════════════════════
+E2 · drain rate vs worker count
+────────────────────────────────────────────────────────────────────
+machine: Apple M4, 10 cores, 16 GB
+docker:  10 CPUs, 7.7 GB
+commit:  7228e44-dirty  go: go1.26.5  k6: grafana/k6:2.4.0
+postgres: 17, fsync=on, synchronous_commit=on (ack path uses synchronous_commit=off per transaction, by design)
+
+[2m13:37:41[0m fresh database
+[2m13:37:43[0m endpoints verified: a=enabled
+── unordered, lane_count=16  (backlog 40000 deliveries, receiver 20 ms, max_concurrency 8 per stream)
+ workers  drain (s)   deliveries/s
+       1     122.79            326
+       2      62.34            642
+       4      32.65           1225
+       8      16.53           2420
+      16       8.45           4734
+      32       8.69           4603
+      64       9.03           4364
+[2m13:44:30[0m fresh database
+[2m13:44:31[0m endpoints verified: a=enabled
+── unordered, lane_count=64  (backlog 40000 deliveries, receiver 20 ms, max_concurrency 8 per stream)
+ workers  drain (s)   deliveries/s
+       1     120.29            332
+       2      62.04            645
+       4      31.80           1258
+       8      16.47           2429
+      16       8.31           4814
+      32       4.68           8547
+      64       2.95          13560
+[2m13:51:04[0m fresh database
+[2m13:51:05[0m endpoints verified: a=enabled
+── ordered, 256 ordering keys  (backlog 4000 deliveries, receiver 20 ms, max_concurrency 8 per stream)
+ workers  drain (s)   deliveries/s
+       1      86.76             46
+       2      43.60             92
+       4      21.99            182
+       8      10.98            364
+      16       5.61            713
+      32       2.97           1347
+      64       1.60           2501

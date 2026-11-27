@@ -1,0 +1,15 @@
+{
+  "mode": "constant",
+  "groups": {
+    "main": {
+      "requests": 14001,
+      "rate": 199.99304703267066,
+      "ok_ratio": 1,
+      "dropped": 0,
+      "p50_ms": 2.015208,
+      "p95_ms": 6.092,
+      "p99_ms": 9.15125,
+      "max_ms": 51.171792
+    }
+  }
+}

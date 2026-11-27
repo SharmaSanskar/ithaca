@@ -1,0 +1,196 @@
+# The public demo on one small VM: Postgres, Redis, the Ithaca services from
+# the release image, and Caddy terminating TLS in front.
+#
+#   cp .env.example .env    # set ITHACA_DOMAIN and POSTGRES_PASSWORD
+#   docker compose up -d
+#
+# See deploy/prod/README.md for the whole runbook, including running this
+# exact stack on a laptop first (ITHACA_DOMAIN=localhost).
+#
+# Shape of it:
+#
+#   internet ─▶ caddy :443 ─┬─ /ws ──▶ ws :8082          (live feed)
+#                           └─ /*  ──▶ api :8080         (dashboard + REST)
+#
+#   worker (demo engine) ─ingest─▶ postgres ◀─lease─ dispatcher ─HTTP─▶ receiver-sim
+#
+# Only Caddy publishes ports. Postgres, Redis and every admin port (metrics,
+# probes) stay on the internal network.
+
+name: ithaca-prod
+
+# Settings every Ithaca service shares. The demo runs short retry and breaker
+# timings so a visitor watches a full failure → retry → dead-letter → recover
+# arc in under a minute; a real deployment keeps the defaults (30 s base,
+# 12 attempts, 30 s cooldown).
+x-ithaca: &ithaca
+  image: ${ITHACA_IMAGE:-ghcr.io/sharmasanskar/ithaca}:${ITHACA_VERSION:-latest}
+  restart: unless-stopped
+  init: true
+  stop_grace_period: 45s # > ITHACA_SHUTDOWN_GRACE, so a drain is never SIGKILLed
+  networks: [ithaca]
+  environment: &ithaca-env
+    ITHACA_ENV: prod
+    ITHACA_LOG_LEVEL: info
+    ITHACA_DATABASE_URL: postgres://ithaca:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/ithaca?sslmode=disable
+    ITHACA_REDIS_URL: redis://redis:6379/0
+    ITHACA_DEMO_MODE: "true"
+    ITHACA_DEMO_SINK_URL: http://receiver-sim:8090
+    # The SSRF guard blocks every private address in prod. The demo's only
+    # legitimate private destination is receiver-sim, at a fixed address, so
+    # exactly that one /32 is opened, and the API additionally refuses any
+    # endpoint URL that is not a sink.
+    ITHACA_DELIVERY_ALLOW_CIDRS: 10.89.0.90/32
+    ITHACA_RETRY_BASE: 500ms
+    ITHACA_RETRY_MAX_ATTEMPTS: "6"
+    ITHACA_BREAKER_COOLDOWN: 3s
+    ITHACA_BREAKER_MAX_COOLDOWN: 10s
+    # An always-on demo must not grow forever: history, attempts and events
+    # older than this are deleted by the janitor.
+    ITHACA_RETENTION: ${ITHACA_RETENTION:-6h}
+    ITHACA_SHUTDOWN_GRACE: 30s
+  depends_on: &ithaca-deps
+    postgres: { condition: service_healthy }
+    redis: { condition: service_healthy }
+    migrate: { condition: service_completed_successfully }
+
+services:
+  caddy:
+    image: caddy:2.10.2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp" # HTTP/3
+    environment:
+      ITHACA_DOMAIN: ${ITHACA_DOMAIN:?set ITHACA_DOMAIN in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data # certificates: losing this re-issues and can hit Let's Encrypt rate limits
+      - caddyconfig:/config
+    networks: [ithaca]
+    depends_on:
+      api: { condition: service_healthy }
+      ws: { condition: service_healthy }
+
+  # ── the application ──────────────────────────────────────────────────────
+  api:
+    <<: *ithaca
+    command: ["api"]
+    healthcheck: { test: ["CMD", "/ithaca", "probe", "http://localhost:9080/readyz"], interval: 5s, timeout: 4s, retries: 12 }
+    mem_limit: 256m
+
+  ws:
+    <<: *ithaca
+    command: ["ws"]
+    healthcheck: { test: ["CMD", "/ithaca", "probe", "http://localhost:9082/readyz"], interval: 5s, timeout: 4s, retries: 12 }
+    mem_limit: 256m
+
+  dispatcher:
+    <<: *ithaca
+    command: ["dispatcher"]
+    environment:
+      <<: *ithaca-env
+      ITHACA_DISPATCH_WORKERS: "32" # a 2-vCPU VM; the benchmarks ran 64
+    healthcheck: { test: ["CMD", "/ithaca", "probe", "http://localhost:9083/readyz"], interval: 5s, timeout: 4s, retries: 12 }
+    mem_limit: 256m
+
+  # The demo engine (scenarios, ambient traffic), the janitor and DLQ replay.
+  # It seeds the demo tenant on first boot.
+  worker:
+    <<: *ithaca
+    command: ["worker"]
+    depends_on:
+      <<: *ithaca-deps
+      seed: { condition: service_completed_successfully }
+    healthcheck: { test: ["CMD", "/ithaca", "probe", "http://localhost:9084/readyz"], interval: 5s, timeout: 4s, retries: 12 }
+    mem_limit: 256m
+
+  # The demo's subscribers: programmable endpoints with latency, failure and
+  # outage knobs, driven by the scenario buttons.
+  receiver-sim:
+    <<: *ithaca
+    command: ["receiver-sim"]
+    depends_on: {}
+    networks:
+      ithaca:
+        ipv4_address: 10.89.0.90 # must match ITHACA_DELIVERY_ALLOW_CIDRS
+    healthcheck: { test: ["CMD", "/ithaca", "probe", "http://localhost:9085/healthz"], interval: 5s, timeout: 4s, retries: 12 }
+    mem_limit: 128m
+
+  # ── one-shot jobs ────────────────────────────────────────────────────────
+  # Migrations run once per `up`, before anything that uses the schema. They
+  # are forward-only and idempotent, so a re-run is a no-op.
+  migrate:
+    <<: *ithaca
+    command: ["migrate", "up"]
+    restart: "no"
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  # Creates the demo tenant and its sink endpoints; a no-op once they exist.
+  seed:
+    <<: *ithaca
+    command: ["demo", "seed"]
+    restart: "no"
+    depends_on:
+      postgres: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+
+  # ── backing services ─────────────────────────────────────────────────────
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ithaca
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ithaca
+    # Durable (fsync and synchronous_commit stay ON, unlike the dev stack),
+    # sized for a 4 GB VM.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - work_mem=8MB
+      - -c
+      - max_connections=120
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - log_min_duration_statement=500
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [ithaca]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ithaca -d ithaca"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    mem_limit: 1g
+
+  # Not a source of truth: it carries the live dashboard feed and the demo's
+  # commands. Losing it costs a stale graph, never a delivery (bench: the first
+  # full benchmark run happened with Redis down, unnoticed by delivery).
+  redis:
+    image: redis:8-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "no", "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru"]
+    networks: [ithaca]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    mem_limit: 128m
+
+networks:
+  ithaca:
+    ipam:
+      config:
+        - subnet: 10.89.0.0/24
+
+volumes:
+  pgdata:
+  caddydata:
+  caddyconfig:

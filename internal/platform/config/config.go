@@ -77,6 +77,9 @@ type Config struct {
 	Delivery  Delivery
 	Demo      Demo
 	WS        WS
+	// ReceiverTrackDeliveries turns on per-delivery bookkeeping in
+	// receiver-sim, for the chaos benchmark's no-phantom-acks check.
+	ReceiverTrackDeliveries bool
 
 	// ShutdownGrace is how long in-flight work gets to finish after SIGTERM.
 	// Kubernetes terminationGracePeriodSeconds MUST be larger than this
@@ -278,7 +281,8 @@ func Load(svc Service) (*Config, error) {
 		WS: WS{
 			MaxConns: l.int("ITHACA_WS_MAX_CONNS", 2000),
 		},
-		ShutdownGrace: l.dur("ITHACA_SHUTDOWN_GRACE", 30*time.Second),
+		ShutdownGrace:           l.dur("ITHACA_SHUTDOWN_GRACE", 30*time.Second),
+		ReceiverTrackDeliveries: l.bool("ITHACA_RECEIVER_TRACK_DELIVERIES", false),
 	}
 	defOrigins := ""
 	if cfg.Env == "dev" {

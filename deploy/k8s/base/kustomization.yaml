@@ -1,0 +1,35 @@
+# The application, cluster-agnostic. Overlays add the environment: where the
+# database is, the hostname, the image digest, replica counts.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: ithaca
+labels:
+  - pairs: { app.kubernetes.io/part-of: ithaca }
+    includeSelectors: false
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - api.yaml
+  - ingest.yaml
+  - ws.yaml
+  - dispatcher.yaml
+  - worker.yaml
+  - receiver-sim.yaml
+  - ingress.yaml
+  - pdb.yaml
+  - networkpolicy.yaml
+images:
+  - name: ithaca
+    newName: ithaca # overlays pin this to registry/ithaca@sha256:...
+configMapGenerator:
+  # Generated, so its name carries a hash of its contents: changing a setting
+  # rolls every pod that reads it, exactly like changing the image does.
+  - name: ithaca-config
+    literals:
+      - ITHACA_ENV=prod
+      - ITHACA_LOG_LEVEL=info
+      - ITHACA_SHUTDOWN_GRACE=30s
+      # Every pod sizes its pool from GOMAXPROCS, which is the node's core
+      # count when there is no CPU limit. A dozen pods x 28 connections would
+      # exhaust Postgres; cap each pod explicitly instead.
+      - ITHACA_DB_MAX_CONNS=8

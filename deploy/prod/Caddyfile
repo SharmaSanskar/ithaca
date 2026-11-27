@@ -1,0 +1,51 @@
+# Caddy terminates TLS and routes two paths. Certificates are automatic:
+#   - a public hostname (ithaca.example.com, or <ip>.sslip.io) gets a real
+#     Let's Encrypt certificate on first request
+#   - ITHACA_DOMAIN=localhost gets a certificate from Caddy's local CA, so the
+#     identical stack runs on a laptop
+#
+# Ithaca's per-IP rate limit on the demo buttons reads X-Forwarded-For. With
+# no trusted_proxies configured (deliberately), Caddy discards whatever a
+# client sent and sets that header from the TCP peer, so a visitor cannot
+# spoof their way around the limit.
+{
+	# The admin API is for config reloads from inside the container only.
+	admin localhost:2019
+}
+
+{$ITHACA_DOMAIN} {
+	encode zstd gzip
+
+	# The live feed. A separate upstream because it is stateful: long-lived
+	# sockets, its own drain story, its own scaling axis.
+	handle /ws {
+		reverse_proxy ws:8082 {
+			# Never buffer a stream of frames.
+			flush_interval -1
+			# Active sockets survive a Caddy config reload, but not forever.
+			stream_close_delay 5m
+		}
+	}
+
+	# Everything else: the REST API and the embedded dashboard (which
+	# serves index.html for client-side routes).
+	handle {
+		reverse_proxy api:8080 {
+			health_uri /api/v1/
+			health_interval 10s
+		}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		X-Frame-Options DENY
+		-Server
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

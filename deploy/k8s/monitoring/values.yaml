@@ -1,0 +1,47 @@
+# kube-prometheus-stack, trimmed for a laptop cluster. Installed by
+# `make k8s-monitoring` (chart version pinned there).
+#
+# The point of having it: the SAME Grafana dashboard and alert rules as the
+# compose stack (deploy/compose/...), loaded from the same files, so there is
+# one definition of "healthy" whether Ithaca runs on a laptop, a VM or k8s.
+
+alertmanager:
+  enabled: false # rules still evaluate and show as firing in Prometheus
+
+prometheus:
+  prometheusSpec:
+    retention: 2d
+    # Pick up ServiceMonitors and rules from any namespace, not only ones
+    # carrying this Helm release's labels.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits: { memory: 1Gi }
+  ingress:
+    enabled: true
+    hosts: [prometheus.localhost]
+
+grafana:
+  adminPassword: admin
+  grafana.ini:
+    auth.anonymous: { enabled: true, org_role: Viewer }
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      searchNamespace: ALL
+  ingress:
+    enabled: true
+    hosts: [grafana.localhost]
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 384Mi }
+
+# k3s runs the control plane in one process and does not expose these
+# components separately; scraping them only produces permanently-down targets.
+kubeEtcd: { enabled: false }
+kubeScheduler: { enabled: false }
+kubeControllerManager: { enabled: false }
+kubeProxy: { enabled: false }

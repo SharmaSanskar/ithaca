@@ -65,6 +65,38 @@ services:
       retries: 30
       start_period: 5s
 
+  # Benchmarks run against THIS Postgres, not the one above: same version,
+  # same memory settings, but production durability (fsync and synchronous
+  # commit ON). Numbers measured with fsync=off would be fiction.
+  #
+  #     make bench-up        start it (port 5433)
+  postgres-bench:
+    image: postgres:17-alpine
+    profiles: ["bench"]
+    ports:
+      - "127.0.0.1:5433:5432"
+    environment:
+      POSTGRES_USER: ithaca
+      POSTGRES_PASSWORD: ithaca
+      POSTGRES_DB: ithaca
+    command:
+      - postgres
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - work_mem=16MB
+      - -c
+      - max_connections=300
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+    volumes:
+      - pgbench:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ithaca -d ithaca"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
   redis:
     image: redis:8-alpine
     restart: unless-stopped
@@ -162,6 +194,7 @@ services:
       - --enable-feature=native-histograms
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
       - promdata:/prometheus
     ports:
       - "127.0.0.1:9090:9090"
@@ -191,6 +224,7 @@ services:
 
 volumes:
   pgdata:
+  pgbench:
   redisdata:
   localstackdata:
   promdata:

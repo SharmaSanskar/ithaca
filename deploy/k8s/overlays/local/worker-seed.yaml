@@ -1,0 +1,19 @@
+# The demo needs its tenant and sink endpoints. Seeding is idempotent and
+# quick, so it runs on every worker start, after the migration and before the
+# demo engine: no Job to babysit, and no ordering problem on a fresh cluster.
+- op: add
+  path: /spec/template/spec/initContainers/-
+  value:
+    name: demo-seed
+    image: ithaca
+    args: ["demo", "seed"]
+    envFrom:
+      - configMapRef: { name: ithaca-config }
+      - secretRef: { name: ithaca-secrets }
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities: { drop: [ALL] }
+    resources:
+      requests: { cpu: 10m, memory: 32Mi }
+      limits: { memory: 64Mi }

@@ -73,10 +73,16 @@ func NewClient(g *Guard) *Client {
 		DialContext:           d.DialContext,
 		TLSHandshakeTimeout:   5 * time.Second,
 		ExpectContinueTimeout: time.Second,
-		MaxIdleConns:          512,
-		// The default of 2 is a real throughput bug for a webhook sender: a
-		// busy endpoint would reconnect on almost every request.
-		MaxIdleConnsPerHost: 16,
+		// One dispatcher at the defaults has 64 workers × max_concurrency 8 =
+		// 512 requests in flight, all possibly to ONE busy host. The per-host
+		// idle cap must cover that, or every request above the cap closes its
+		// connection after use and the next one dials a new one. Measured
+		// (bench E2): with a per-host cap of 16, a 14k deliveries/s drain
+		// piled up 16k sockets in TIME_WAIT within two seconds, exhausted the
+		// ephemeral port range, and collapsed to ~2k/s. Go's default of 2 is
+		// the same bug, sooner.
+		MaxIdleConns:        512,
+		MaxIdleConnsPerHost: 512,
 		IdleConnTimeout:     90 * time.Second,
 		ForceAttemptHTTP2:   true,
 	}

@@ -1,0 +1,93 @@
+name: e2e-k3d
+
+# The Kubernetes gate, on a throwaway cluster per run:
+#   1. build the image, push it to the cluster's registry, deploy BY DIGEST
+#   2. every rollout must complete (probes, init-container migrations, PSA)
+#   3. NetworkPolicies must be enforced, not merely applied
+#   4. restart every deployment under load: 100% accepted, 100% delivered
+#   5. a burst must make KEDA scale the dispatchers out, and back in
+#
+# Same scripts as `make k8s-deploy` / `make k8s-check` on a laptop, so a green
+# run here means the laptop instructions work too.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "cmd/**"
+      - "internal/**"
+      - "migrations/**"
+      - "web/**"
+      - "build/**"
+      - "deploy/k8s/**"
+      - "scripts/k8s-*.sh"
+      - "bench/k6/**"
+      - ".github/workflows/e2e-k3d.yml"
+  pull_request:
+    paths:
+      - "cmd/**"
+      - "internal/**"
+      - "migrations/**"
+      - "web/**"
+      - "build/**"
+      - "deploy/k8s/**"
+      - "scripts/k8s-*.sh"
+      - "bench/k6/**"
+      - ".github/workflows/e2e-k3d.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: e2e-k3d-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: deploy, enforce, roll
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: install k3d
+        run: curl -sfL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | TAG=v5.9.0 bash
+
+      - name: create the cluster
+        run: |
+          k3d cluster create --config deploy/k8s/k3d.yaml --wait
+          kubectl wait --for=condition=Ready nodes --all --timeout=120s
+          # Traefik is installed by a k3s Helm job after the nodes are ready.
+          until kubectl -n kube-system get deploy/traefik >/dev/null 2>&1; do sleep 2; done
+          kubectl -n kube-system rollout status deploy/traefik --timeout=180s
+
+      - name: install KEDA
+        run: |
+          helm repo add kedacore https://kedacore.github.io/charts
+          helm install keda kedacore/keda --version 2.21.1 --namespace keda --create-namespace --wait --timeout 5m
+
+      - name: deploy by digest
+        run: scripts/k8s-deploy.sh
+
+      - name: network policies are enforced
+        run: scripts/k8s-netpol-check.sh
+
+      - name: restart everything under load
+        run: scripts/k8s-rollout-check.sh
+
+      # Sized for a 4-vCPU runner: 80 orders/s against a 1 s ordered
+      # consumer needs ~80 workers in flight, 3+ dispatchers' worth.
+      - name: a burst scales the dispatchers out and back in
+        run: RATE=200 DURATION=60 ASSERT_SCALE=3 scripts/k8s-burst.sh
+
+      - name: dump the cluster on failure
+        if: failure()
+        run: |
+          kubectl -n ithaca get pods -o wide
+          kubectl -n ithaca get events --sort-by=.lastTimestamp | tail -40
+          for p in $(kubectl -n ithaca get pods -o name); do
+            echo "── $p"; kubectl -n ithaca logs "$p" --all-containers --tail=40 || true
+          done

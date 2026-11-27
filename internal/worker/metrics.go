@@ -19,6 +19,7 @@ type Metrics struct {
 	Completed      *prometheus.CounterVec
 	AttemptLatency prometheus.Histogram
 	EndToEnd       prometheus.Histogram
+	QueueWait      prometheus.Histogram
 
 	BreakerTransitions *prometheus.CounterVec
 	BreakerParked      prometheus.Counter
@@ -100,6 +101,11 @@ func NewMetrics(reg prometheus.Registerer, slots *Slots) *Metrics {
 			Namespace: ns, Subsystem: "queue", Name: "streams_paused_total",
 			Help: "Ordered streams paused because their head was dead-lettered.",
 		}),
+		QueueWait: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Namespace: ns, Subsystem: "delivery", Name: "queue_wait_seconds",
+			Help:    "From event ingest to the FIRST delivery attempt starting: the time an event spends queued, separate from delivery latency.",
+			Buckets: []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30},
+		}),
 		RunnableStreams: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: ns, Subsystem: "queue", Name: "runnable_streams", Help: "Streams ready to lease now.",
 		}),
@@ -115,7 +121,7 @@ func NewMetrics(reg prometheus.Registerer, slots *Slots) *Metrics {
 		}),
 	}
 	reg.MustRegister(m.LeaseBatch, m.DequeueErrors, m.LeasesLost, m.Reaped, m.Panics, m.AckDuration,
-		m.AckErrors, m.Attempts, m.Completed, m.AttemptLatency, m.EndToEnd,
+		m.AckErrors, m.Attempts, m.Completed, m.AttemptLatency, m.EndToEnd, m.QueueWait,
 		m.BreakerTransitions, m.BreakerParked, m.BreakerProbes, m.AutoDisabled, m.StreamsPaused,
 		m.RunnableStreams, m.LeasedStreams, m.PendingDeliveries, m.OldestPending)
 	if slots != nil {

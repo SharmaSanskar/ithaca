@@ -1,0 +1,27 @@
+# One hostname, two upstreams, the same split Caddy does in deploy/prod: the
+# WebSocket hub on /ws, everything else (REST + the embedded dashboard) on the
+# API. Same-origin, so no CORS and the hub's origin check is a plain
+# Origin == Host comparison. The overlay sets the host.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ithaca
+spec:
+  rules:
+    - host: ithaca.example.com
+      http:
+        paths:
+          # Prefix, not Exact, on purpose. Traefik ranks routes by the LENGTH
+          # of the rule string, so `Path(/ws)` (11 chars) loses to the
+          # catch-all `PathPrefix(/)` (15) and the hub never sees a socket.
+          # `PathPrefix(/ws)` (16) wins; anything else under /ws is a 404
+          # from the hub.
+          - path: /ws
+            pathType: Prefix
+            backend: { service: { name: ws, port: { name: http } } }
+          - path: /v1/events
+            pathType: Prefix
+            backend: { service: { name: ingest, port: { name: http } } }
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: api, port: { name: http } } }

@@ -486,6 +486,85 @@ func TestZombieWorkerIsFencedOut(t *testing.T) {
 	}
 }
 
+// The lost wakeup, reproduced deterministically. An enqueue onto a LEASED
+// stream leaves it leased (it must not yank the stream from its worker) and
+// relies on the worker's release to notice the new delivery. The release
+// blocks on the enqueue's row lock; when the enqueue commits, Postgres
+// re-checks the stream row at its latest version, but the release's "anything
+// pending?" subquery keeps its old snapshot and sees nothing. Before the fix
+// the stream went 'idle' with a pending delivery in it, and nothing ever
+// leased it again (bench E5: 2 of 45,006 deliveries stuck forever).
+func TestEnqueueRacingTheFinalReleaseIsNotLost(t *testing.T) {
+	h := newHarness(t)
+	ep := h.endpoint("race", time.Second)
+	h.subscribe(ep, true)
+	h.publish("k", 1)
+	ctx := context.Background()
+
+	leases, err := h.q.Lease(ctx, queue.LeaseRequest{WorkerID: "w", Max: 1, MinLease: time.Minute})
+	if err != nil || len(leases) != 1 {
+		t.Fatalf("lease: %v %d", err, len(leases))
+	}
+	l := leases[0]
+	msgs, _ := h.q.Fetch(ctx, l, 10)
+	if _, err = h.q.Ack(ctx, l, []queue.Result{{DeliveryID: msgs[0].DeliveryID, Disposition: queue.Succeeded, Attempts: 1}}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A second event's enqueue, held open mid-transaction: exactly what
+	// ingest does, through the same query.
+	var sub, event uuid.UUID
+	var key string
+	if err = h.store.Pool.QueryRow(ctx, `SELECT dh.subscription_id, dh.event_id, ds.stream_key
+		FROM deliveries_history dh JOIN delivery_streams ds ON ds.id = dh.stream_id`).Scan(&sub, &event, &key); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := h.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := gen.New(tx).EnqueueDelivery(ctx, gen.EnqueueDeliveryParams{
+		DeliveryID: uuid.Must(uuid.NewV7()), TenantID: h.tenant, SubscriptionID: sub, EndpointID: ep,
+		EventID: event, StreamKey: key, Ordered: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The worker's release, racing it. Wait until Postgres says it is blocked
+	// on the enqueue's row lock, so the interleaving is the bad one every run.
+	released := make(chan error, 1)
+	go func() { released <- h.q.Release(ctx, l, 0) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for h.count("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%ReleaseStream%'") == 0 {
+		select {
+		case err := <-released:
+			t.Fatalf("release returned (%v) without waiting for the enqueue's row lock", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("release never blocked on the enqueue's row lock")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-released; err != nil {
+		t.Fatal(err)
+	}
+
+	var state string
+	_ = h.store.Pool.QueryRow(ctx, "SELECT state FROM delivery_streams").Scan(&state)
+	if state != "ready" {
+		t.Fatalf("stream is %q with a delivery pending; want ready (an idle stream is never leased again)", state)
+	}
+	again, _ := h.q.Lease(ctx, queue.LeaseRequest{WorkerID: "w2", Max: 1, MinLease: time.Minute})
+	if len(again) != 1 {
+		t.Fatal("the stream holding the new delivery is not leasable")
+	}
+}
+
 // Phase 2 gate: the lease renews during a long drain. Five 900ms deliveries on
 // one ordered stream take ~4.5s against a 2s lease, with a reaper sweeping
 // every 100ms. Without heartbeats the reaper would steal the stream mid-drain

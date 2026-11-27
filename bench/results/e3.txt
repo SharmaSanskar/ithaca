@@ -1,0 +1,32 @@
+════════════════════════════════════════════════════════════════════
+E3 · end-to-end latency decomposed (queue wait vs delivery)
+────────────────────────────────────────────────────────────────────
+machine: Apple M4, 10 cores, 16 GB
+docker:  10 CPUs, 7.7 GB
+commit:  7228e44-dirty  go: go1.26.5  k6: grafana/k6:2.4.0
+postgres: 17, fsync=on, synchronous_commit=on (ack path uses synchronous_commit=off per transaction, by design)
+
+[2m13:54:18[0m fresh database
+[2m13:54:19[0m endpoints verified: b=enabled a=enabled
+── 200 events/s for 70 s (first 10 s excluded), fanout 2, receivers 20 ms, 64 workers, default polling (50 ms floor → 500 ms ceiling)
+ingest (k6, every request): p50 2.07 ms · p99 8.23 ms · 100.00% accepted
+delivery (exact, from the attempt log; ms):
+ endpoint |   n   | qw_p50 | qw_p99 | del_p50 | del_p99 | e2e_p50 | e2e_p95 | e2e_p99 | e2e_max 
+----------+-------+--------+--------+---------+---------+---------+---------+---------+---------
+ a        | 12035 |   16.8 |   32.7 |    21.0 |    22.0 |    37.9 |    50.7 |    54.2 |    81.1
+ b        | 12035 |   16.9 |   32.6 |    21.0 |    22.0 |    38.1 |    50.8 |    54.0 |    74.8
+          | 24070 |   16.8 |   32.7 |    21.0 |    22.0 |    38.0 |    50.7 |    54.1 |    81.1
+
+
+[2m13:55:30[0m fresh database
+[2m13:55:31[0m endpoints verified: b=enabled a=enabled
+── 20 events/s for 70 s (first 10 s excluded), fanout 2, receivers 20 ms, 64 workers, default polling (50 ms floor → 500 ms ceiling)
+ingest (k6, every request): p50 5.73 ms · p99 12.37 ms · 100.00% accepted
+delivery (exact, from the attempt log; ms):
+ endpoint |  n   | qw_p50 | qw_p99 | del_p50 | del_p99 | e2e_p50 | e2e_p95 | e2e_p99 | e2e_max 
+----------+------+--------+--------+---------+---------+---------+---------+---------+---------
+ a        | 1204 |   34.2 |  101.0 |    22.0 |    22.0 |    55.5 |   114.4 |   122.8 |   132.4
+ b        | 1204 |   34.3 |  100.9 |    22.0 |    22.0 |    55.5 |   114.4 |   122.8 |   132.4
+          | 2408 |   34.3 |  101.0 |    22.0 |    22.0 |    55.5 |   114.4 |   122.8 |   132.4
+
+

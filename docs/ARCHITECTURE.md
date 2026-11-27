@@ -208,6 +208,31 @@ Things the tests measured that changed the implementation:
   lane's concurrency (8) cut that to **~5%**, bounded by one chunk per lease held, at the cost of
   ~25% peak throughput (14.7k → 10.9k deliveries/s under the race detector). For a webhook system
   that is the right trade: duplicates cost every subscriber, raw throughput is rarely the limit.
+- **The connection pool must be as wide as the concurrency.** The delivery client kept 16 idle
+  connections per host while one dispatcher can have 512 requests in flight to that host. Every
+  request above 16 closed its connection afterwards, so a sustained drain dialed once per
+  delivery: 16k sockets piled up in TIME_WAIT within two seconds, the ephemeral port range ran
+  out, and a 14k deliveries/s drain collapsed to ~2k/s (bench E2). Short benchmarks never saw it,
+  because they finished before the ports ran out. The per-host cap now matches the pool's
+  maximum in flight, and `TestConcurrentDeliveriesToOneHostReuseConnections` counts dials.
+- **A lost wakeup hid behind READ COMMITTED.** An enqueue onto a leased stream leaves it leased
+  and relies on the worker's release to notice the new delivery. When the release blocked on the
+  enqueue's row lock, Postgres re-checked the stream row at its latest version, but the
+  release's "anything pending?" subquery kept its old snapshot, saw nothing, and parked the
+  stream `idle` with a delivery in it, where nothing would ever lease it. The benchmarks caught
+  it as 1–2 deliveries in 45,006 stuck forever (E5), and an invariant test with a forced
+  interleaving reproduces it every run. The release now compares the snapshot's `next_seq` and
+  `paused_delivery_id` with the latest row's; if anything moved, the stream goes back to `ready`.
+- **Autoscale on work, not on the queue.** The first KEDA scaler counted due deliveries. Under a
+  sustained burst it scaled 2 → 9 dispatchers, drained the queue, then read the short queue as
+  "1 pod" and scaled to 3 *while the load continued*, so the backlog regrew to 6.4k. It now scales
+  on worker demand (leased streams + due streams ÷ workers per pod), which settled at the
+  measured 7 pods under the same load ([ADR-0006](DECISIONS/adr-0006-keda-on-parallelizable-work.md)).
+- **A saturated pool lets a slow consumer starve its neighbors (open).** Pinned at 2 dispatchers
+  under that burst, a 1 s ordered subscriber's streams held nearly every worker, and 40 ms
+  subscribers queued behind it. `max_concurrency` bounds requests per stream, not workers per
+  endpoint. Spare capacity (E4) or autoscaling hides it. Fair leasing, a per-endpoint share of
+  the pool, would fix it.
 - **Crash recovery time equals the lease TTL.** A `kill -9`'d dispatcher's streams sit leased until
   their lease expires (30s minimum) and the reaper reclaims them. Shorter leases recover faster but
   cost more heartbeat writes; the reaper runs inside every dispatcher, so there is no separate

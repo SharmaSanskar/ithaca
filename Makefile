@@ -96,6 +96,19 @@ demo: build ## Run the full demo locally: seed, then every service in demo mode
 	ITHACA_DEMO_MODE=true ITHACA_RETRY_BASE=500ms ITHACA_RETRY_MAX_ATTEMPTS=6 \
 	ITHACA_BREAKER_COOLDOWN=3s ITHACA_BREAKER_MAX_COOLDOWN=10s ./scripts/dev.sh start
 
+.PHONY: bench-up
+bench-up: ## Start the durable benchmark Postgres (port 5433)
+	$(COMPOSE) --profile bench up -d --wait postgres-bench
+
+.PHONY: bench
+bench: build bench-up ## Run one benchmark: make bench E=e3 (e1 e2 e3 e4 e5 e8 all)
+	./bench/run.sh $(or $(E),all)
+
+.PHONY: dashboards
+dashboards: ## Regenerate the Grafana dashboard JSON and the k8s PrometheusRule from their sources
+	python3 deploy/compose/grafana/dashboards.py
+	python3 deploy/k8s/monitoring/gen_rules.py
+
 .PHONY: redis-cli
 redis-cli: ## Open a redis shell
 	$(COMPOSE) exec redis redis-cli
@@ -164,6 +177,63 @@ build-full: web-build ## Build the binary with the dashboard embedded
 docker: ## Build the container image
 	VERSION=$(VERSION) COMMIT=$(COMMIT) BUILD_DATE=$(BUILD_DATE) \
 		docker buildx bake -f build/docker-bake.hcl ithaca
+
+# The production stack (deploy/prod) on this machine, at https://localhost.
+# Same compose file and Caddyfile as the server; only the env file differs.
+PROD_COMPOSE := docker compose -f deploy/prod/docker-compose.yml --env-file tmp/prod.env
+
+.PHONY: prod-local
+prod-local: docker ## Run the production stack locally at https://localhost
+	@mkdir -p tmp
+	@[ -f tmp/prod.env ] || printf 'ITHACA_DOMAIN=localhost\nPOSTGRES_PASSWORD=%s\nITHACA_IMAGE=ithaca\nITHACA_VERSION=dev\n' "$$(openssl rand -hex 16)" > tmp/prod.env
+	$(PROD_COMPOSE) up -d
+	@printf '\n  https://localhost  (accept the local certificate once)\n\n'
+
+.PHONY: prod-local-down
+prod-local-down: ## Stop the local production stack (keeps its data)
+	$(PROD_COMPOSE) down
+
+# ── Kubernetes (k3d) ─────────────────────────────────────────────────────────
+KPS_VERSION  := 94.1.0 # kube-prometheus-stack chart
+KEDA_VERSION := 2.21.1 # KEDA chart
+
+.PHONY: k8s-up
+k8s-up: ## Create the local k3d cluster (1 server, 2 agents, a registry) with KEDA
+	k3d cluster create --config deploy/k8s/k3d.yaml
+	$(MAKE) k8s-keda
+
+.PHONY: k8s-keda
+k8s-keda: ## Install the KEDA operator (the dispatchers' autoscaler)
+	helm repo add kedacore https://kedacore.github.io/charts >/dev/null 2>&1 || true
+	helm upgrade --install keda kedacore/keda --version $(KEDA_VERSION) \
+		--namespace keda --create-namespace --wait --timeout 5m
+
+.PHONY: k8s-deploy
+k8s-deploy: ## Build, push and deploy by digest; waits for every rollout
+	scripts/k8s-deploy.sh
+	@printf '\n  http://ithaca.localhost:8088\n\n'
+
+.PHONY: k8s-monitoring
+k8s-monitoring: ## Install Prometheus + Grafana in the cluster, with Ithaca's dashboard and alerts
+	helm repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null 2>&1 || true
+	helm upgrade --install kps prometheus-community/kube-prometheus-stack --version $(KPS_VERSION) \
+		--namespace monitoring --create-namespace -f deploy/k8s/monitoring/values.yaml --wait --timeout 10m
+	kustomize build --load-restrictor LoadRestrictionsNone deploy/k8s/monitoring | kubectl apply -f -
+	@printf '\n  Grafana     http://grafana.localhost:8088  (Dashboards → Ithaca · overview)\n  Prometheus  http://prometheus.localhost:8088\n\n'
+
+.PHONY: k8s-check
+k8s-check: ## Prove NetworkPolicies are enforced, then restart everything under load
+	scripts/k8s-netpol-check.sh
+	scripts/k8s-rollout-check.sh
+
+.PHONY: k8s-burst
+k8s-burst: ## The autoscaling demo: a 60k-event burst, dispatchers scale out and back (BASELINE=1 to pin at 2)
+	@# caffeinate (macOS) keeps the laptop awake for the run; elsewhere run it directly.
+	@if command -v caffeinate >/dev/null; then caffeinate -i scripts/k8s-burst.sh; else scripts/k8s-burst.sh; fi
+
+.PHONY: k8s-down
+k8s-down: ## Delete the local cluster and its registry
+	k3d cluster delete --config deploy/k8s/k3d.yaml
 
 .PHONY: clean
 clean: ## Remove build artifacts

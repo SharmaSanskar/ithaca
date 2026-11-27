@@ -1,0 +1,8 @@
+# Postgres and Redis inside the cluster, for local and CI clusters. A real
+# environment would drop this component and point ITHACA_DATABASE_URL at a
+# managed database (RDS, Cloud SQL) instead; nothing in base changes.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - postgres.yaml
+  - redis.yaml

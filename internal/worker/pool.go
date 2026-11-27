@@ -92,6 +92,13 @@ type Pool struct {
 	// shutdown would have to drain work nobody is tracking.
 	leases chan *queue.Lease
 
+	// wake nudges an idle dispatcher when a worker releases a stream. Without
+	// it, a pool with more workers than runnable streams polls, finds nothing
+	// (every stream is leased), backs off toward PollCeiling, and then leaves
+	// just-released streams idle until its next poll. E2 measured that: with
+	// 16 lanes, 64 workers drained 2x SLOWER than 16 workers.
+	wake chan struct{}
+
 	stopAccepting chan struct{} // closed by Shutdown: phase 1
 	stopOnce      sync.Once
 	hardCutCh     chan struct{} // closed for the hard cut: phase 3
@@ -104,6 +111,7 @@ func New(cfg Config, q queue.Queue, exec Executor, slots *Slots, log *slog.Logge
 	return &Pool{
 		cfg: cfg, q: q, exec: exec, slots: slots, log: log, m: m, clock: clk,
 		leases:        make(chan *queue.Lease),
+		wake:          make(chan struct{}, 1),
 		stopAccepting: make(chan struct{}),
 		hardCutCh:     make(chan struct{}),
 		done:          make(chan struct{}),
@@ -244,9 +252,14 @@ func (p *Pool) dispatch(workCtx context.Context) {
 
 		if len(leases) == 0 {
 			// Adaptive polling: back off toward the ceiling while idle, snap
-			// to the floor as soon as there is work.
+			// to the floor as soon as there is work — or as soon as a worker
+			// releases a stream, which may still have work in it.
 			backoff = min(backoff*2, p.cfg.PollCeiling)
-			if !sleep(ctx, jitter(backoff)) {
+			switch sleepOrWake(ctx, jitter(backoff), p.wake) {
+			case slept:
+			case woken:
+				backoff = p.cfg.PollFloor
+			case canceled:
 				return
 			}
 			continue
@@ -495,6 +508,10 @@ func (p *Pool) release(ctx context.Context, l *queue.Lease, notBefore time.Durat
 	if err := p.q.Release(ctx, l, notBefore); err != nil && !errors.Is(err, queue.ErrLeaseLost) {
 		p.log.Warn("release failed; the reaper will reclaim the stream", "stream", l.StreamID, "error", err)
 	}
+	select { // non-blocking: one pending nudge is enough
+	case p.wake <- struct{}{}:
+	default:
+	}
 }
 
 // heartbeat renews the lease every TTL/3 until ctx ends. On a definitive loss
@@ -526,6 +543,27 @@ func (p *Pool) heartbeat(ctx context.Context, l *queue.Lease, lost *atomic.Bool,
 			// lease expires, and the fenced ack refuses our stale write.
 			p.log.Warn("lease renewal failed", "stream", l.StreamID, "error", err)
 		}
+	}
+}
+
+type wakeResult int
+
+const (
+	slept wakeResult = iota
+	woken
+	canceled
+)
+
+func sleepOrWake(ctx context.Context, d time.Duration, wake <-chan struct{}) wakeResult {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return canceled
+	case <-wake:
+		return woken
+	case <-t.C:
+		return slept
 	}
 }
 

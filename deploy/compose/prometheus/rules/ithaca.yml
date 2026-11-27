@@ -1,0 +1,81 @@
+# Alert rules. Each one is about a user-visible failure or its leading
+# indicator, not a resource graph. Thresholds are deliberately conservative
+# for a demo-scale deployment; the comment says what each means.
+groups:
+  - name: ithaca
+    rules:
+      # The best single health signal: work is due and not being done.
+      - alert: IthacaDeliveryLagging
+        expr: max(ithaca_queue_oldest_pending_seconds) > 60
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "Deliveries are waiting: oldest due delivery is {{ $value | humanizeDuration }} old"
+          description: "Dispatchers are not keeping up (or are down). Check pool saturation and dispatcher replicas."
+
+      - alert: IthacaDeliveryStalled
+        expr: max(ithaca_queue_oldest_pending_seconds) > 300
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "Delivery stalled: oldest due delivery is {{ $value | humanizeDuration }} old"
+
+      # Ingest is the one component whose failure LOSES data.
+      - alert: IthacaIngestErrors
+        expr: |
+          sum(rate(ithaca_http_requests_total{listener="ingest",code="5xx"}[5m]))
+            / clamp_min(sum(rate(ithaca_http_requests_total{listener="ingest"}[5m])), 1e-9) > 0.01
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "More than 1% of ingest requests are failing"
+
+      - alert: IthacaIngestSlow
+        expr: |
+          histogram_quantile(0.99, sum by (le) (rate(ithaca_http_request_duration_seconds_bucket{listener="ingest",route="/v1/events"}[5m]))) > 0.1
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Ingest p99 above 100ms for 10 minutes"
+
+      - alert: IthacaDispatcherDown
+        expr: absent(up{job="ithaca",service="dispatcher"} == 1)
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "No dispatcher is up: nothing is being delivered"
+
+      # Capacity: sustained saturation is the scale-up signal (KEDA, Phase 9).
+      - alert: IthacaWorkerPoolSaturated
+        expr: sum(ithaca_pool_slots_in_flight) / clamp_min(sum(ithaca_pool_slots_capacity), 1) > 0.9
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Worker pool above 90% for 10 minutes: add dispatcher replicas"
+
+      # Workers dying: a reap only happens when a lease's holder vanished.
+      - alert: IthacaLeasesReaped
+        expr: sum(increase(ithaca_queue_leases_reaped_total[10m])) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $value }} leases reclaimed in 10m: dispatchers are crashing or being killed"
+
+      - alert: IthacaDeadLettersRising
+        expr: sum(increase(ithaca_delivery_completed_total{final_state="dead"}[10m])) > 50
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $value }} deliveries dead-lettered in 10 minutes"
+
+      - alert: IthacaCircuitOpened
+        expr: sum(increase(ithaca_breaker_transitions_total{transition="opened"}[5m])) > 0
+        labels: { severity: info }
+        annotations:
+          summary: "A circuit breaker opened: an endpoint is failing"
+
+      # The dashboard going stale is not an outage, but it should be noticed.
+      - alert: IthacaLiveFeedDropping
+        expr: sum(rate(ithaca_live_publish_dropped_total[5m])) > 0
+        for: 5m
+        labels: { severity: info }
+        annotations:
+          summary: "Live dashboard batches are being dropped (Redis slow or down)"

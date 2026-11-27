@@ -1,0 +1,61 @@
+# The k3d cluster from deploy/k8s/k3d.yaml: in-cluster Postgres and Redis, the
+# public demo turned on, served at http://ithaca.localhost:8088.
+#
+# The image here is a NAME, never a tag. `make k8s-deploy` (and CI) pin it to
+# the exact digest they just pushed, so what runs is byte-for-byte what was
+# built, and a re-pushed tag can never change a running pod.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: ithaca
+resources:
+  - ../../base
+components:
+  - ../../components/local-deps
+  - ../../components/autoscaling
+images:
+  - name: ithaca
+    newName: ithaca-registry.localhost:5001/ithaca
+secretGenerator:
+  # Local only. A real environment sources this from a secret manager
+  # (External Secrets, Sealed Secrets); the base only expects the name.
+  # The database host is fully qualified because the KEDA operator, in its own
+  # namespace, runs the autoscaler's query with this same URL.
+  - name: ithaca-secrets
+    literals:
+      - POSTGRES_PASSWORD=ithaca-local
+      - ITHACA_DATABASE_URL=postgres://ithaca:ithaca-local@postgres.ithaca.svc.cluster.local:5432/ithaca?sslmode=disable
+      - ITHACA_REDIS_URL=redis://redis:6379/0
+configMapGenerator:
+  # The demo, as in deploy/prod: short retry and breaker timings so a visitor
+  # sees a full failure → retry → dead letter → recovery arc in under a minute.
+  - name: ithaca-config
+    behavior: merge
+    literals:
+      - ITHACA_DEMO_MODE=true
+      - ITHACA_DEMO_SINK_URL=http://receiver-sim:8090
+      # The SSRF guard blocks private addresses in prod. The receiver's
+      # Service has a pinned ClusterIP (receiver-sim.yaml), and exactly that
+      # /32 is allowed.
+      - ITHACA_DELIVERY_ALLOW_CIDRS=10.43.200.90/32
+      - ITHACA_RETRY_BASE=500ms
+      - ITHACA_RETRY_MAX_ATTEMPTS=6
+      - ITHACA_BREAKER_COOLDOWN=3s
+      - ITHACA_BREAKER_MAX_COOLDOWN=10s
+      - ITHACA_RETENTION=6h
+patches:
+  - path: receiver-sim.yaml
+  - path: worker-seed.yaml
+    target: { kind: Deployment, name: worker }
+  # The autoscaling component allows 20 dispatchers. One laptop VM serves one
+  # Postgres to all of them, and past ~10 the database (and with it ingest)
+  # saturates; measured, not guessed.
+  - target: { kind: ScaledObject, name: dispatcher }
+    patch: |-
+      - op: replace
+        path: /spec/maxReplicaCount
+        value: 10
+  - target: { kind: Ingress, name: ithaca }
+    patch: |-
+      - op: replace
+        path: /spec/rules/0/host
+        value: ithaca.localhost

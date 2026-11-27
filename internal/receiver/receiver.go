@@ -65,6 +65,22 @@ type Receiver struct {
 	inFlight map[string]int
 	maxInFl  map[string]int
 	arrivals map[string]int64 // counted at arrival, for FailRequests
+
+	// delivered, when tracking is on, counts 2xx answers per delivery id per
+	// sink: the receiver's side of the no-phantom-acks check (every delivery
+	// the database marks succeeded must appear here).
+	delivered map[string]map[string]int
+}
+
+// TrackDeliveries turns on per-delivery-id bookkeeping (GET
+// /sink/{id}/delivered). Off by default: an always-on demo must not grow a
+// set forever.
+func (r *Receiver) TrackDeliveries() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.delivered == nil {
+		r.delivered = map[string]map[string]int{}
+	}
 }
 
 // SinkStats is a per-sink running tally (kept even when the log is off).
@@ -175,6 +191,22 @@ func (r *Receiver) Mount(mux chi.Router) {
 		r.SetSink(chi.URLParam(req, "id"), b)
 		writeJSON(w, http.StatusOK, b)
 	})
+	mux.Get("/sink/{id}/delivered", func(w http.ResponseWriter, req *http.Request) {
+		r.mu.Lock()
+		if r.delivered == nil {
+			r.mu.Unlock()
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "delivery tracking is off (ITHACA_RECEIVER_TRACK_DELIVERIES)"})
+			return
+		}
+		ids := make(map[string]int, len(r.delivered[chi.URLParam(req, "id")]))
+		total := 0
+		for id, n := range r.delivered[chi.URLParam(req, "id")] {
+			ids[id] = n
+			total += n
+		}
+		r.mu.Unlock()
+		writeJSON(w, http.StatusOK, map[string]any{"unique": len(ids), "total": total, "ids": ids})
+	})
 	mux.Get("/sink/{id}/stats", func(w http.ResponseWriter, req *http.Request) {
 		r.mu.Lock()
 		st := SinkStats{}
@@ -283,6 +315,12 @@ func (r *Receiver) serveSink(w http.ResponseWriter, req *http.Request) {
 	st.Requests++
 	if status >= 200 && status < 300 {
 		st.Succeeded++
+		if r.delivered != nil {
+			if r.delivered[sink] == nil {
+				r.delivered[sink] = map[string]int{}
+			}
+			r.delivered[sink][rec.DeliveryID]++
+		}
 	} else {
 		st.Failed++
 	}

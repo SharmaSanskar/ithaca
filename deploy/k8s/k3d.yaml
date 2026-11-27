@@ -1,0 +1,36 @@
+# A local Kubernetes cluster that behaves like a real one: one server and two
+# agents (so PodDisruptionBudgets and pod spreading mean something), a
+# standalone registry (images are pushed and deployed by digest, exactly like
+# CI), and Traefik as the ingress controller.
+#
+#   make k8s-up       create it
+#   make k8s-deploy   build, push, deploy by digest, wait for rollout
+#   make k8s-down     delete it
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: ithaca
+servers: 1
+agents: 2
+image: rancher/k3s:v1.33.6-k3s1
+ports:
+  # http://ithaca.localhost:8088 (*.localhost resolves to 127.0.0.1)
+  - port: 8088:80
+    nodeFilters: [loadbalancer]
+registries:
+  create:
+    name: ithaca-registry.localhost
+    host: "0.0.0.0"
+    hostPort: "5001"
+options:
+  k3s:
+    extraArgs:
+      # Pin the Service CIDR: the demo receiver's ClusterIP is pinned inside
+      # it, and the dispatcher's SSRF allowlist names exactly that one /32.
+      - arg: --service-cidr=10.43.0.0/16
+        nodeFilters: [server:*]
+      # Workloads run on the agents only, as on any real cluster. On one
+      # laptop VM a busy app pod on the server node starves the API server,
+      # and then kubectl, the HPA and KEDA all stall together.
+      - arg: --node-taint=node-role.kubernetes.io/control-plane=true:NoSchedule
+        nodeFilters: [server:*]
